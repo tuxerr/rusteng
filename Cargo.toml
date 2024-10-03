@@ -1,0 +1,15 @@
+[package]
+name = "foxy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cgmath = "0.18.0"
+winit = "0.30.5"
+gltf = "1.4.1"
+ash = { version = "0.38.0", features = ["linked"] }
+ash-window = "0.13.0"
+
+[[bin]]
+name = "force-build"
+path = "build.rs"
