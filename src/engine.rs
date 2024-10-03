@@ -7,9 +7,10 @@ const REQUIRED_DEVICE_EXTENSIONS: [*const i8; 3] = [
 ];
 const MAX_FRAMES_IN_FLIGHT: u32 = 3;
 
-use ash::vk;
+use ash::vk::{self, Buffer};
 
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle};
+use gltf;
 
 pub struct Engine {
     frame_index: i64,
@@ -22,6 +23,22 @@ pub struct Engine {
     commandpools: Vec<vk::CommandPool>,
     semaphores: Vec<vk::Semaphore>,
     fences: Vec<vk::Fence>,
+    global_ibo: vkutil::Buffer,
+    global_vbo: vkutil::Buffer,
+}
+
+#[derive(Default)]
+struct BufferSlice {
+    size : u32,
+    offset : u32
+}
+
+struct Object {
+    pub name : String,
+    pub transform : cgmath::Matrix4<f32>,
+    pub gltf_document : gltf::Document,
+    ibo_slice : BufferSlice,
+    vbo_slice : BufferSlice
 }
 
 struct FrameData<'a> {
@@ -47,6 +64,9 @@ impl Engine {
 
         let context = vkutil::VkContextData::instanciateWithExtensions(&required_instance_extensions, &REQUIRED_DEVICE_EXTENSIONS);
     
+        let global_ibo = vkutil::Buffer::new_from_size_and_flags(16 * 1024 * 1024, vk::BufferUsageFlags::INDEX_BUFFER, &context);
+        let global_vbo = vkutil::Buffer::new_from_size_and_flags(16 * 1024 * 1024, vk::BufferUsageFlags::STORAGE_BUFFER, &context);
+
         let mut eng = Engine {
             frame_index: 0,
             context: context,
@@ -58,6 +78,8 @@ impl Engine {
             commandpools: Vec::new(),
             semaphores: Vec::new(),
             fences: Vec::new(),
+            global_ibo,
+            global_vbo
         };
 
         eng.render_init();
@@ -387,4 +409,11 @@ impl Engine {
         //scene rendering
     }
 
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.global_ibo.destroy(&self.context);
+        self.global_vbo.destroy(&self.context);
+    }
 }

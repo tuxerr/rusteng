@@ -12,6 +12,8 @@ use std::path::Path;
 
 use std::{ffi::CStr, ffi::CString, u64};
 
+use vk_mem::{self, Alloc}; // vma allocator for buffers/textures
+
 const VKAPP_NAME: &str = "FoxyGfx";
 
 pub struct Queues {
@@ -29,6 +31,7 @@ pub struct VkContextData {
     pub physical_device: ash::vk::PhysicalDevice,
     pub device: ash::Device,
     pub queues: Queues,
+    pub vma_alloc: vk_mem::Allocator
 }
 
 impl VkContextData {
@@ -37,7 +40,7 @@ impl VkContextData {
         let entry = ash::Entry::linked();
 
         let app_info = vk::ApplicationInfo {
-            api_version: vk::make_api_version(0, 1, 3, 0),
+            api_version: vk::API_VERSION_1_3,
             p_application_name: VKAPP_NAME.as_ptr().cast(),
             ..Default::default()
         };
@@ -154,12 +157,21 @@ impl VkContextData {
             present_queue: present_queue,
         };
 
+        let mut vma_alloc_create_info = vk_mem::AllocatorCreateInfo::new(&instance, &device, physical_device);
+        vma_alloc_create_info.flags = vk_mem::AllocatorCreateFlags::BUFFER_DEVICE_ADDRESS;
+        vma_alloc_create_info.vulkan_api_version = vk::API_VERSION_1_3;
+
+        let vma_alloc = unsafe {
+            vk_mem::Allocator::new(vma_alloc_create_info).expect("Failure to instanciate VMA")
+        };
+
         VkContextData {
             entry,
             instance,
             physical_device,
             device,
             queues,
+            vma_alloc
         }
     }
 }
@@ -313,7 +325,8 @@ impl Pipeline {
 
 pub struct Buffer {
     size : usize,
-    pub vk_buffer : vk::Buffer
+    pub mem_alloc : vk_mem::Allocation,
+    pub vk_buffer : vk::Buffer,
 }
 
 impl Buffer {
@@ -328,13 +341,25 @@ impl Buffer {
             .usage(local_flags)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-        let buf = unsafe {
-            context.device.create_buffer(&buffer_create_info, None).expect("Failure to create buffer")
+        let vma_create_info = vk_mem::AllocationCreateInfo {
+            usage : vk_mem::MemoryUsage::AutoPreferDevice,
+            ..Default::default()
+        };
+
+        let (buf,alloc) = unsafe {
+            context.vma_alloc.create_buffer(&buffer_create_info, &vma_create_info).expect("Failure to create buffer")
         };
 
         Buffer {
             size: size,
+            mem_alloc: alloc,
             vk_buffer : buf
+        }
+    }
+
+    pub fn destroy(&mut self, context: &VkContextData) {
+        unsafe {
+            context.vma_alloc.destroy_buffer(self.vk_buffer, &mut self.mem_alloc);
         }
     }
 }

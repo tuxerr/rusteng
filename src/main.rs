@@ -68,8 +68,8 @@ impl ApplicationHandler for App {
 
 fn main() {
     println!("Engine start");
-    // let (document, buffer, images) =
-    //     gltf::import("assets/Fox.glb").expect("Unable to load Fox model");
+    let (document, buffer, images) =
+         gltf::import("assets/Fox.glb").expect("Unable to load Fox model");
 
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
