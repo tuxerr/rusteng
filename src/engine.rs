@@ -1,16 +1,16 @@
 pub mod vkutil;
 
-const REQUIRED_DEVICE_EXTENSIONS: [*const i8; 3] = [
+const REQUIRED_DEVICE_EXTENSIONS: [*const i8; 2] = [
     ash::khr::swapchain::NAME.as_ptr(),
     ash::khr::dynamic_rendering::NAME.as_ptr(),
-    ash::ext::shader_object::NAME.as_ptr(),
 ];
 const MAX_FRAMES_IN_FLIGHT: u32 = 3;
 
 use ash::vk::{self, Buffer};
 
-use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle};
 use gltf;
+use std::cmp;
+use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle};
 
 pub struct Engine {
     frame_index: i64,
@@ -29,16 +29,16 @@ pub struct Engine {
 
 #[derive(Default)]
 struct BufferSlice {
-    size : u32,
-    offset : u32
+    size: u32,
+    offset: u32,
 }
 
 struct Object {
-    pub name : String,
-    pub transform : cgmath::Matrix4<f32>,
-    pub gltf_document : gltf::Document,
-    ibo_slice : BufferSlice,
-    vbo_slice : BufferSlice
+    pub name: String,
+    pub transform: cgmath::Matrix4<f32>,
+    pub gltf_document: gltf::Document,
+    ibo_slice: BufferSlice,
+    vbo_slice: BufferSlice,
 }
 
 struct FrameData<'a> {
@@ -62,10 +62,21 @@ impl Engine {
         let required_instance_extensions = ash_window::enumerate_required_extensions(disp_handle)
             .expect("Failure to enumerate required extensions!");
 
-        let context = vkutil::VkContextData::instanciateWithExtensions(&required_instance_extensions, &REQUIRED_DEVICE_EXTENSIONS);
-    
-        let global_ibo = vkutil::Buffer::new_from_size_and_flags(16 * 1024 * 1024, vk::BufferUsageFlags::INDEX_BUFFER, &context);
-        let global_vbo = vkutil::Buffer::new_from_size_and_flags(16 * 1024 * 1024, vk::BufferUsageFlags::STORAGE_BUFFER, &context);
+        let context = vkutil::VkContextData::instanciateWithExtensions(
+            &required_instance_extensions,
+            &REQUIRED_DEVICE_EXTENSIONS,
+        );
+
+        let global_ibo = vkutil::Buffer::new_from_size_and_flags(
+            16 * 1024 * 1024,
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            &context,
+        );
+        let global_vbo = vkutil::Buffer::new_from_size_and_flags(
+            16 * 1024 * 1024,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            &context,
+        );
 
         let mut eng = Engine {
             frame_index: 0,
@@ -79,7 +90,7 @@ impl Engine {
             semaphores: Vec::new(),
             fences: Vec::new(),
             global_ibo,
-            global_vbo
+            global_vbo,
         };
 
         eng.render_init();
@@ -131,7 +142,7 @@ impl Engine {
 
     fn scene_init(&mut self) {
         let fox_shader_name = String::from("main");
-        let _fox_shader_pipeline = vkutil::Pipeline::load_gfx_pipeline_from_name(&fox_shader_name, &self.context);
+        //let _fox_shader_pipeline = vkutil::Pipeline::load_gfx_pipeline_from_name(&fox_shader_name, &self.context);
     }
 
     pub fn window_init(&mut self, window: &winit::window::Window) {
@@ -142,14 +153,8 @@ impl Engine {
             ash_window::create_surface(
                 &self.context.entry,
                 &self.context.instance,
-                window
-                    .display_handle()
-                    .unwrap()
-                    .as_raw(),
-                window
-                    .window_handle()
-                    .unwrap()
-                    .as_raw(),
+                window.display_handle().unwrap().as_raw(),
+                window.window_handle().unwrap().as_raw(),
                 None,
             )
             .expect("Failure to instanciate VK_KHR_Surface for rendering")
@@ -172,6 +177,11 @@ impl Engine {
             )
         };
 
+        println!(
+            "Surface capabilities : {:#?}, format {:#?}, presents {:#?}",
+            surf_capabilities, surf_formats, surf_present_modes
+        );
+
         let mut format = *surf_formats.first().unwrap();
         for form in &surf_formats {
             if form.format == vk::Format::B8G8R8A8_SRGB
@@ -188,10 +198,6 @@ impl Engine {
             }
         }
 
-        assert!(
-            surf_capabilities.min_image_count <= 3 && surf_capabilities.max_image_count >= 3,
-            "3 must be supported as swapchain size!"
-        );
         assert!(
             surf_capabilities
                 .supported_usage_flags
@@ -213,9 +219,14 @@ impl Engine {
                 surf_capabilities.max_image_extent.height,
             ));
 
+        let min_image_count = 3.clamp(
+            surf_capabilities.min_image_count,
+            cmp::max(surf_capabilities.max_image_count, 32),
+        );
+
         let swap_create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface)
-            .min_image_count(3)
+            .min_image_count(min_image_count)
             .image_format(format.format)
             .image_color_space(format.color_space)
             .image_extent(swapchain_size)
@@ -269,6 +280,10 @@ impl Engine {
 
     pub fn render(&mut self) {
         self.frame_index += 1;
+        if (self.frame_index > 5) {
+            return;
+        }
+
         let frame_indexer = (self.frame_index % MAX_FRAMES_IN_FLIGHT as i64) as usize;
         let dynrend_loader =
             ash::khr::dynamic_rendering::Device::new(&self.context.instance, &self.context.device);
@@ -301,13 +316,25 @@ impl Engine {
                 .expect("Failure to acquire image")
         };
         let image_view_acquired = self.swapchain_image_views[acquire_res as usize];
-        // println!(
-        //     "Acquired image {} : {:?} in frame {}",
-        //     acquire_res, image_view_acquired, self.frame_index
-        // );
+        let image_acquired = self.swapchain_images[acquire_res as usize];
+        println!(
+            "Acquired image {} : {:?} in frame {}",
+            acquire_res, image_view_acquired, self.frame_index
+        );
+
+        unsafe {
+            self.context
+                .device
+                .reset_command_pool(
+                    frame_data.commandpool,
+                    vk::CommandPoolResetFlags::RELEASE_RESOURCES,
+                )
+                .expect("Failure to free commandpool");
+        }
 
         // allocate and begin command buffer work on frame
         let commandbuffer = unsafe {
+            //allocate cmdbuf
             let alloc_info = vk::CommandBufferAllocateInfo::default()
                 .command_pool(frame_data.commandpool)
                 .level(vk::CommandBufferLevel::PRIMARY)
@@ -320,6 +347,8 @@ impl Engine {
                 .into_iter()
                 .nth(0)
                 .unwrap();
+
+            //begin cmdbuf
             self.context
                 .device
                 .begin_command_buffer(cmdbuf, &vk::CommandBufferBeginInfo::default())
@@ -327,6 +356,35 @@ impl Engine {
 
             cmdbuf
         };
+
+        // transitioning resources
+        unsafe {
+            let image_barrier = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(
+                    vk::AccessFlags::COLOR_ATTACHMENT_READ
+                        | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                )
+                .image(image_acquired)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .level_count(vk::REMAINING_MIP_LEVELS)
+                        .layer_count(vk::REMAINING_ARRAY_LAYERS),
+                );
+
+            self.context.device.cmd_pipeline_barrier(
+                commandbuffer,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[image_barrier],
+            );
+        }
 
         // start dynamic rendering
         unsafe {
@@ -358,6 +416,32 @@ impl Engine {
             dynrend_loader.cmd_end_rendering(commandbuffer);
         }
 
+        // transitioning resources back to present
+        unsafe {
+            let image_barrier = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .dst_access_mask(vk::AccessFlags::empty())
+                .image(image_acquired)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .level_count(vk::REMAINING_MIP_LEVELS)
+                        .layer_count(vk::REMAINING_ARRAY_LAYERS),
+                );
+
+            self.context.device.cmd_pipeline_barrier(
+                commandbuffer,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[image_barrier],
+            );
+        }
+
         //end command buffer, submit work and present swapchain on queue
         unsafe {
             self.context
@@ -367,11 +451,13 @@ impl Engine {
 
             let commandbuffers_submit = [commandbuffer];
             let framestart_sem = [frame_data.semaphores[0]];
+            let framestart_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
             let frameend_sem = [frame_data.semaphores[1]];
 
             let queue_submit_info = vk::SubmitInfo::default()
                 .command_buffers(&commandbuffers_submit)
                 .wait_semaphores(&framestart_sem)
+                .wait_dst_stage_mask(&framestart_stages)
                 .signal_semaphores(&frameend_sem);
 
             self.context
@@ -393,22 +479,11 @@ impl Engine {
                 )
                 .expect("Failure to present queue");
         }
-
-        unsafe {
-            self.context
-                .device
-                .reset_command_pool(
-                    frame_data.commandpool,
-                    vk::CommandPoolResetFlags::RELEASE_RESOURCES,
-                )
-                .expect("Failure to free commandpool");
-        }
     }
 
     fn render_scene(&self, commandbuffer: &vk::CommandBuffer) {
         //scene rendering
     }
-
 }
 
 impl Drop for Engine {

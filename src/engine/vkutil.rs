@@ -15,6 +15,7 @@ use std::{ffi::CStr, ffi::CString, u64};
 use vk_mem::{self, Alloc}; // vma allocator for buffers/textures
 
 const VKAPP_NAME: &str = "FoxyGfx";
+const VKVALID_NAME: &CStr = c"VK_LAYER_KHRONOS_validation";
 
 pub struct Queues {
     pub gfx_queue_idx: u32,
@@ -44,11 +45,21 @@ impl VkContextData {
             p_application_name: VKAPP_NAME.as_ptr().cast(),
             ..Default::default()
         };
-        let instance_create_info = vk::InstanceCreateInfo {
+        let mut instance_create_info = vk::InstanceCreateInfo {
             p_application_info: &app_info,
             ..Default::default()
         }
         .enabled_extension_names(required_instance_exts);
+
+        let available_layers = unsafe {
+            entry.enumerate_instance_layer_properties().expect("Failure to enumerate layers")
+        };
+        println!("Available layers : {:#?}", available_layers);
+        let enabled_layer_names = [VKVALID_NAME.as_ptr()];
+
+        if available_layers.into_iter().any(|layer| layer.layer_name_as_c_str().unwrap().eq(VKVALID_NAME)) {
+            instance_create_info = instance_create_info.enabled_layer_names(&enabled_layer_names);
+        }
 
         // instance create
         let instance = unsafe {
@@ -57,7 +68,7 @@ impl VkContextData {
                 .expect("Failure to create instance")
         };
 
-        let surfacekhr_win32_loader = ash::khr::win32_surface::Instance::new(&entry, &instance);
+       // let surfacekhr_win32_loader = ash::khr::win32_surface::Instance::new(&entry, &instance);
 
         // physical device create and queue retrieval
         let (physical_device, (gfxqidx, transferqidx, presentqidx)) = unsafe {
@@ -85,9 +96,9 @@ impl VkContextData {
                     transfer = Some(index.try_into().unwrap());
                 }
 
-                if (surfacekhr_win32_loader
+                /*if (surfacekhr_win32_loader
                     .get_physical_device_win32_presentation_support(pd, index.try_into().unwrap())
-                    && present.is_none())
+                    && present.is_none())*/
                 {
                     present = Some(index.try_into().unwrap());
                 }
@@ -127,11 +138,12 @@ impl VkContextData {
         // enable dynamic rendering feature
         let mut enable_dynrender =
             vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
-        let mut enable_shader_object =
-            vk::PhysicalDeviceShaderObjectFeaturesEXT::default().shader_object(true);
+        let mut enable_bda =
+            vk::PhysicalDeviceBufferDeviceAddressFeatures::default().buffer_device_address(true);
+
         let mut physicalfeatures2 = vk::PhysicalDeviceFeatures2::default()
             .push_next(&mut enable_dynrender)
-            .push_next(&mut enable_shader_object);
+            .push_next(&mut enable_bda);
 
         let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&gfx_queue_create_info)
