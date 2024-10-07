@@ -20,7 +20,7 @@ fn main() {
 
             println!("Compiling {} into VS and FS", &shader_name);
 
-            Command::new("slangc.exe")
+            Command::new("slangc")
                 .args(&[shader_name.as_str(), "-profile", "sm_6_0", "-entry", "vertexMain", "-target", "spirv", "-o"])
                 .arg(&format!("vs{}.o", shader_name_noext))
                 .output().expect("slang failure");
@@ -28,6 +28,6 @@ fn main() {
             Command::new("slangc")
                 .args(&[shader_name.as_str(), "-profile", "sm_6_0", "-entry", "fragmentMain", "-target", "spirv", "-o"])
                 .arg(&format!("fs{}.o", shader_name_noext))
-                .output().expect("slang failure");
+                .output().expect("slang failure"); 
         });
 }

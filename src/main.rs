@@ -1,18 +1,5 @@
-use std::io::Read;
-use std::{ffi::CStr, ffi::CString, u64};
-
-use std::fs::File;
-use std::path::Path;
-
-use gltf;
-use std::collections::HashMap;
-
 use winit::{
-    application::ApplicationHandler,
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle},
-    window::Window,
+    application::ApplicationHandler, event::{Event, WindowEvent}, event_loop::{ControlFlow, EventLoop}, platform::x11::EventLoopBuilderExtX11, raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle}, window::Window
 };
 
 use ash_window;
@@ -68,10 +55,9 @@ impl ApplicationHandler for App {
 
 fn main() {
     println!("Engine start");
-    let (document, buffer, images) =
-         gltf::import("assets/Fox.glb").expect("Unable to load Fox model");
 
-    let event_loop = EventLoop::new().unwrap();
+    //let event_loop = EventLoop::new().unwrap();
+    let event_loop = EventLoop::builder().with_x11().build().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
 
     // predisplay handle for vulkan gfx init

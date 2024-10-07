@@ -1,3 +1,4 @@
+pub mod object;
 pub mod vkutil;
 
 const REQUIRED_DEVICE_EXTENSIONS: [*const i8; 2] = [
@@ -6,10 +7,12 @@ const REQUIRED_DEVICE_EXTENSIONS: [*const i8; 2] = [
 ];
 const MAX_FRAMES_IN_FLIGHT: u32 = 3;
 
-use ash::vk::{self, Buffer};
+use ash::vk::{self, Buffer, PipelineLayout};
 
 use gltf;
+use object::Object;
 use std::cmp;
+use std::rc::Rc;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle};
 
 pub struct Engine {
@@ -23,22 +26,12 @@ pub struct Engine {
     commandpools: Vec<vk::CommandPool>,
     semaphores: Vec<vk::Semaphore>,
     fences: Vec<vk::Fence>,
+    objects: Vec<Object>,
+    opaque_layout: PipelineLayout,
     global_ibo: vkutil::Buffer,
     global_vbo: vkutil::Buffer,
-}
-
-#[derive(Default)]
-struct BufferSlice {
-    size: u32,
-    offset: u32,
-}
-
-struct Object {
-    pub name: String,
-    pub transform: cgmath::Matrix4<f32>,
-    pub gltf_document: gltf::Document,
-    ibo_slice: BufferSlice,
-    vbo_slice: BufferSlice,
+    global_scene: vkutil::Buffer,
+    staging_buf: vkutil::Buffer,
 }
 
 struct FrameData<'a> {
@@ -50,9 +43,9 @@ struct FrameData<'a> {
 impl<'a> FrameData<'_> {
     fn new(engine: &'a Engine, indexer: usize) -> FrameData<'a> {
         FrameData {
-            commandpool: engine.commandpools[indexer],
-            semaphores: &engine.semaphores[indexer * 2..indexer * 2 + 2],
-            fence: engine.fences[indexer],
+            commandpool: engine.commandpools[1 + indexer],
+            semaphores: &engine.semaphores[1 + indexer * 2..indexer * 2 + 3],
+            fence: engine.fences[1 + indexer],
         }
     }
 }
@@ -70,13 +63,44 @@ impl Engine {
         let global_ibo = vkutil::Buffer::new_from_size_and_flags(
             16 * 1024 * 1024,
             vk::BufferUsageFlags::INDEX_BUFFER,
+            vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
             &context,
         );
         let global_vbo = vkutil::Buffer::new_from_size_and_flags(
             16 * 1024 * 1024,
             vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
             &context,
         );
+        let global_scene = vkutil::Buffer::new_from_size_and_flags(
+            1 * 1024 * 1024 * MAX_FRAMES_IN_FLIGHT as usize,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
+            &context,
+        );
+        let staging_buf = vkutil::Buffer::new_from_size_and_flags(
+            8 * 1024 * 1024,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
+                | vk_mem::AllocationCreateFlags::MAPPED,
+            &context,
+        );
+
+        //default engine-wide push constant layouts
+        let opaque_mesh_pushconstant_layout = unsafe {
+            let push_constant_ranges = [
+                vk::PushConstantRange::default()
+                    .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+                    .offset(0)
+                    .size(16), // 2 buffer device addresses for mesh and object data
+            ];
+            let layout_create_info =
+                vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push_constant_ranges);
+            context
+                .device
+                .create_pipeline_layout(&layout_create_info, None)
+                .expect("Failure to create pipeline layout")
+        };
 
         let mut eng = Engine {
             frame_index: 0,
@@ -89,8 +113,12 @@ impl Engine {
             commandpools: Vec::new(),
             semaphores: Vec::new(),
             fences: Vec::new(),
+            objects: Vec::new(),
+            opaque_layout: opaque_mesh_pushconstant_layout,
             global_ibo,
             global_vbo,
+            global_scene,
+            staging_buf,
         };
 
         eng.render_init();
@@ -100,7 +128,8 @@ impl Engine {
 
     fn render_init(&mut self) {
         println!("Initializing engine datastructures");
-        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+        let structure_depth = MAX_FRAMES_IN_FLIGHT + 1;
+        for _ in 0..structure_depth {
             let cmdpool_create_info = vk::CommandPoolCreateInfo::default()
                 .queue_family_index(self.context.queues.gfx_queue_idx)
                 .flags(vk::CommandPoolCreateFlags::TRANSIENT);
@@ -142,7 +171,14 @@ impl Engine {
 
     fn scene_init(&mut self) {
         let fox_shader_name = String::from("main");
-        //let _fox_shader_pipeline = vkutil::Pipeline::load_gfx_pipeline_from_name(&fox_shader_name, &self.context);
+        let fox_shader_pipeline = Rc::new(vkutil::Pipeline::load_gfx_pipeline_from_name(
+            &fox_shader_name,
+            &self.context,
+        ));
+
+        let fox_obj =
+            object::Object::loadObjectInEngine(self, String::from("Fox"), fox_shader_pipeline);
+        self.objects.push(fox_obj);
     }
 
     pub fn window_init(&mut self, window: &winit::window::Window) {
@@ -192,11 +228,11 @@ impl Engine {
         }
 
         let mut present_mode = vk::PresentModeKHR::FIFO;
-        for p in surf_present_modes {
+        /*for p in surf_present_modes {
             if p == vk::PresentModeKHR::MAILBOX {
                 present_mode = vk::PresentModeKHR::MAILBOX;
             }
-        }
+        }*/
 
         assert!(
             surf_capabilities
@@ -332,30 +368,9 @@ impl Engine {
                 .expect("Failure to free commandpool");
         }
 
-        // allocate and begin command buffer work on frame
-        let commandbuffer = unsafe {
-            //allocate cmdbuf
-            let alloc_info = vk::CommandBufferAllocateInfo::default()
-                .command_pool(frame_data.commandpool)
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .command_buffer_count(1);
-            let cmdbuf = self
-                .context
-                .device
-                .allocate_command_buffers(&alloc_info)
-                .expect("Failed to allocate commandbuffer")
-                .into_iter()
-                .nth(0)
-                .unwrap();
-
-            //begin cmdbuf
-            self.context
-                .device
-                .begin_command_buffer(cmdbuf, &vk::CommandBufferBeginInfo::default())
-                .expect("Failure to start recording cmdbuf");
-
-            cmdbuf
-        };
+        let commandbuffer = self
+            .context
+            .allocate_and_begin_commandbuffer(&frame_data.commandpool);
 
         // transitioning resources
         unsafe {
@@ -483,6 +498,59 @@ impl Engine {
 
     fn render_scene(&self, commandbuffer: &vk::CommandBuffer) {
         //scene rendering
+        let viewport = vk::Viewport::default()
+            .max_depth(1.0f32)
+            .width(self.swapchain_extent.width as f32)
+            .height(self.swapchain_extent.height as f32);
+        let scissor = vk::Rect2D::default().extent(self.swapchain_extent);
+
+        pub fn convert(data: &[u32; 4]) -> [u8; 16] {
+            unsafe { std::mem::transmute(*data) }
+        }
+
+        unsafe {
+            self.context
+                .device
+                .cmd_set_viewport(*commandbuffer, 0, &[viewport]);
+            self.context
+                .device
+                .cmd_set_scissor(*commandbuffer, 0, &[scissor]);
+            self.context.device.cmd_bind_index_buffer(
+                *commandbuffer,
+                self.global_ibo.vk_buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
+
+            let push_constant_addresses = [
+                self.global_vbo.buffer_address,
+                self.global_scene.buffer_address
+            ];
+            let push_constant_addresses_u8 : [u8; 16] = std::mem::transmute(push_constant_addresses);
+
+            self.context.device.cmd_push_constants(
+                *commandbuffer,
+                self.opaque_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                &push_constant_addresses_u8[..],
+            );
+        }
+
+        for obj in &self.objects {
+            unsafe {
+                self.context.device.cmd_bind_pipeline(
+                    *commandbuffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    obj.pipeline.vk_pipeline,
+                );
+
+                let index_count = obj.ibo_slice.size / std::mem::size_of::<u32>() as u32;
+                self.context
+                    .device
+                    .cmd_draw_indexed(*commandbuffer, index_count, 1, 0, 0, 0);
+            }
+        }
     }
 }
 
@@ -490,5 +558,6 @@ impl Drop for Engine {
     fn drop(&mut self) {
         self.global_ibo.destroy(&self.context);
         self.global_vbo.destroy(&self.context);
+        self.staging_buf.destroy(&self.context);
     }
 }

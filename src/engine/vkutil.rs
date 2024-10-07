@@ -32,11 +32,14 @@ pub struct VkContextData {
     pub physical_device: ash::vk::PhysicalDevice,
     pub device: ash::Device,
     pub queues: Queues,
-    pub vma_alloc: vk_mem::Allocator
+    pub vma_alloc: vk_mem::Allocator,
 }
 
 impl VkContextData {
-    pub fn instanciateWithExtensions(required_instance_exts: &[*const i8], required_device_exts : &[*const i8]) -> Self {
+    pub fn instanciateWithExtensions(
+        required_instance_exts: &[*const i8],
+        required_device_exts: &[*const i8],
+    ) -> Self {
         println!("Initializing VK graphics");
         let entry = ash::Entry::linked();
 
@@ -51,13 +54,54 @@ impl VkContextData {
         }
         .enabled_extension_names(required_instance_exts);
 
-        let available_layers = unsafe {
-            entry.enumerate_instance_layer_properties().expect("Failure to enumerate layers")
-        };
-        println!("Available layers : {:#?}", available_layers);
-        let enabled_layer_names = [VKVALID_NAME.as_ptr()];
+        for ext in required_instance_exts {
+            let ext_str = unsafe { CStr::from_ptr(ext.clone()) };
+            println!("Ext : {:#?}", ext_str);
+        }
 
-        if available_layers.into_iter().any(|layer| layer.layer_name_as_c_str().unwrap().eq(VKVALID_NAME)) {
+        let available_layers = unsafe {
+            entry
+                .enumerate_instance_layer_properties()
+                .expect("Failure to enumerate layers")
+        };
+
+        let available_extensions = unsafe {
+            entry
+                .enumerate_instance_extension_properties(None)
+                .expect("Failure to fetch extensions")
+        };
+        for (index, ext) in available_extensions.iter().enumerate() {
+            println!(
+                "Extension {} is {:#?}",
+                index,
+                ext.extension_name_as_c_str().unwrap()
+            );
+        }
+
+        for layer in &available_layers {
+            println!("Layer : {:#?}", layer.layer_name_as_c_str().unwrap());
+            println!("Layer prop : {:#?}", layer);
+            let available_extensions = unsafe {
+                entry
+                    .enumerate_instance_extension_properties(Some(
+                        layer.layer_name_as_c_str().unwrap(),
+                    ))
+                    .expect("Failure to fetch extensions")
+            };
+            for (index, ext) in available_extensions.iter().enumerate() {
+                println!(
+                    "Extension {} is {:#?}",
+                    index,
+                    ext.extension_name_as_c_str().unwrap()
+                );
+            }
+        }
+
+        let enabled_layer_names = [VKVALID_NAME.as_ptr()];
+        if available_layers
+            .into_iter()
+            .any(|layer| layer.layer_name_as_c_str().unwrap().eq(VKVALID_NAME))
+        {
             instance_create_info = instance_create_info.enabled_layer_names(&enabled_layer_names);
         }
 
@@ -68,16 +112,17 @@ impl VkContextData {
                 .expect("Failure to create instance")
         };
 
-       // let surfacekhr_win32_loader = ash::khr::win32_surface::Instance::new(&entry, &instance);
+        // let surfacekhr_win32_loader = ash::khr::win32_surface::Instance::new(&entry, &instance);
 
         // physical device create and queue retrieval
-        let (physical_device, (gfxqidx, transferqidx, presentqidx)) = unsafe {
+        let (physical_device, (gfxqidx, transferqidx, presentqidx), pdfeatures) = unsafe {
             let physical_devices = instance
                 .enumerate_physical_devices()
                 .expect("Failure to enumerate PDs");
             let pd = physical_devices[0];
 
             let pdprop = instance.get_physical_device_properties(pd);
+            let pdfeatures = instance.get_physical_device_features(pd);
             let pdqueues = instance.get_physical_device_queue_family_properties(pd);
             let mut gfx: Option<u32> = None;
             let mut transfer: Option<u32> = None;
@@ -97,8 +142,8 @@ impl VkContextData {
                 }
 
                 /*if (surfacekhr_win32_loader
-                    .get_physical_device_win32_presentation_support(pd, index.try_into().unwrap())
-                    && present.is_none())*/
+                .get_physical_device_win32_presentation_support(pd, index.try_into().unwrap())
+                && present.is_none())*/
                 {
                     present = Some(index.try_into().unwrap());
                 }
@@ -112,16 +157,17 @@ impl VkContextData {
             transfer.expect("Expected to find transfer queue at this point");
             present.expect("Expected to find presentation queue at this point");
 
-            println!(
-                "Found GPU : {:#?} and queue indices for gfx ({}) and transfer({}) and present({})",
-                pdprop,
-                gfx.unwrap(),
-                transfer.unwrap(),
-                present.unwrap(),
-            );
+            // println!(
+            //     "Found GPU : {:#?} and queue indices for gfx ({}) and transfer({}) and present({})",
+            //     pdprop,
+            //     gfx.unwrap(),
+            //     transfer.unwrap(),
+            //     present.unwrap(),
+            // );
             (
                 physical_devices[0],
                 (gfx.unwrap(), transfer.unwrap(), present.unwrap()),
+                pdfeatures
             )
         };
 
@@ -140,10 +186,17 @@ impl VkContextData {
             vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
         let mut enable_bda =
             vk::PhysicalDeviceBufferDeviceAddressFeatures::default().buffer_device_address(true);
+        let mut enable_variablepointers =
+            vk::PhysicalDeviceVariablePointersFeatures::default().variable_pointers(true).variable_pointers_storage_buffer(true);
+        let mut enable_shaderint64 = 
+            vk::PhysicalDeviceShaderAtomicInt64Features::default().shader_buffer_int64_atomics(true).shader_shared_int64_atomics(true);
 
         let mut physicalfeatures2 = vk::PhysicalDeviceFeatures2::default()
             .push_next(&mut enable_dynrender)
-            .push_next(&mut enable_bda);
+            .push_next(&mut enable_bda)
+            .push_next(&mut enable_variablepointers)
+            .push_next(&mut enable_shaderint64)
+            .features(pdfeatures);
 
         let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&gfx_queue_create_info)
@@ -169,7 +222,8 @@ impl VkContextData {
             present_queue: present_queue,
         };
 
-        let mut vma_alloc_create_info = vk_mem::AllocatorCreateInfo::new(&instance, &device, physical_device);
+        let mut vma_alloc_create_info =
+            vk_mem::AllocatorCreateInfo::new(&instance, &device, physical_device);
         vma_alloc_create_info.flags = vk_mem::AllocatorCreateFlags::BUFFER_DEVICE_ADDRESS;
         vma_alloc_create_info.vulkan_api_version = vk::API_VERSION_1_3;
 
@@ -183,8 +237,37 @@ impl VkContextData {
             physical_device,
             device,
             queues,
-            vma_alloc
+            vma_alloc,
         }
+    }
+
+    pub fn allocate_and_begin_commandbuffer(
+        &self,
+        pool: &ash::vk::CommandPool,
+    ) -> ash::vk::CommandBuffer {
+        // allocate and begin command buffer work on frame
+        let commandbuffer = unsafe {
+            //allocate cmdbuf
+            let alloc_info = vk::CommandBufferAllocateInfo::default()
+                .command_pool(*pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1);
+            let cmdbuf = self
+                .device
+                .allocate_command_buffers(&alloc_info)
+                .expect("Failed to allocate commandbuffer")
+                .into_iter()
+                .nth(0)
+                .unwrap();
+
+            //begin cmdbuf
+            self.device
+                .begin_command_buffer(cmdbuf, &vk::CommandBufferBeginInfo::default())
+                .expect("Failure to start recording cmdbuf");
+
+            cmdbuf
+        };
+        commandbuffer
     }
 }
 
@@ -252,11 +335,14 @@ impl Pipeline {
                 vk::PushConstantRange::default()
                     .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
                     .offset(0)
-                    .size(16) // 2 buffer device addresses for mesh and object data
+                    .size(16), // 2 buffer device addresses for mesh and object data
             ];
-            let layout_create_info = vk::PipelineLayoutCreateInfo::default()
-                .push_constant_ranges(&push_constant_ranges);
-            context.device.create_pipeline_layout(&layout_create_info, None).expect("Failure to create pipeline layout")
+            let layout_create_info =
+                vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push_constant_ranges);
+            context
+                .device
+                .create_pipeline_layout(&layout_create_info, None)
+                .expect("Failure to create pipeline layout")
         };
 
         let stages = [
@@ -276,7 +362,16 @@ impl Pipeline {
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
             .primitive_restart_enable(false);
 
-        let viewport_state = vk::PipelineViewportStateCreateInfo::default();
+        let viewport = [vk::Viewport::default()
+            .max_depth(1.0f32)
+            .width(512 as f32)
+            .height(512 as f32)];
+        let scissor =
+            [vk::Rect2D::default().extent(vk::Extent2D::default().width(512).height(512))];
+
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewports(&viewport)
+            .scissors(&scissor);
 
         let raster_state = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
@@ -293,20 +388,18 @@ impl Pipeline {
             .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
 
         // opaque draw
-        let color_blend_attachments = [
-            vk::PipelineColorBlendAttachmentState::default()
-                .blend_enable(false)
-        ];
-        let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
-            .attachments(&color_blend_attachments);
+        let color_blend_attachments =
+            [vk::PipelineColorBlendAttachmentState::default().blend_enable(false)];
+        let color_blend_state =
+            vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
 
         let dynamic_state = vk::PipelineDynamicStateCreateInfo::default()
             .dynamic_states(&[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR]);
 
         let mut rendering_state = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(&[vk::Format::B8G8R8A8_SRGB])
-            .depth_attachment_format(vk::Format::D24_UNORM_S8_UINT)
-            .stencil_attachment_format(vk::Format::D24_UNORM_S8_UINT);
+            .depth_attachment_format(vk::Format::D32_SFLOAT)
+            .stencil_attachment_format(vk::Format::UNDEFINED);
 
         let pipeline_create_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
@@ -336,42 +429,71 @@ impl Pipeline {
 }
 
 pub struct Buffer {
-    size : usize,
-    pub mem_alloc : vk_mem::Allocation,
-    pub vk_buffer : vk::Buffer,
+    pub size: usize,
+    pub mem_alloc: vk_mem::Allocation,
+    pub vk_buffer: vk::Buffer,
+    pub buffer_address: u64, //buffer_device_address allocation
 }
 
 impl Buffer {
-    pub fn new_from_size_and_flags(size : usize, flags : vk::BufferUsageFlags, context: &VkContextData) -> Self {
+    pub fn new_from_size_and_flags(
+        size: usize,
+        flags: vk::BufferUsageFlags,
+        vma_flags: vk_mem::AllocationCreateFlags,
+        context: &VkContextData,
+    ) -> Self {
         let mut local_flags = flags;
-        if(local_flags.contains(vk::BufferUsageFlags::STORAGE_BUFFER) | local_flags.contains(vk::BufferUsageFlags::INDEX_BUFFER)) {
+        if (local_flags.contains(vk::BufferUsageFlags::STORAGE_BUFFER)
+            | local_flags.contains(vk::BufferUsageFlags::INDEX_BUFFER))
+        {
             local_flags |= vk::BufferUsageFlags::TRANSFER_DST;
+            local_flags |= vk::BufferUsageFlags::TRANSFER_SRC;
         }
-        
+
+        if local_flags.contains(vk::BufferUsageFlags::STORAGE_BUFFER) {
+            local_flags |= vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+        }
+
         let buffer_create_info = vk::BufferCreateInfo::default()
             .size(size as u64)
             .usage(local_flags)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let vma_create_info = vk_mem::AllocationCreateInfo {
-            usage : vk_mem::MemoryUsage::AutoPreferDevice,
+            usage: vk_mem::MemoryUsage::Auto,
+            flags: vma_flags,
             ..Default::default()
         };
 
-        let (buf,alloc) = unsafe {
-            context.vma_alloc.create_buffer(&buffer_create_info, &vma_create_info).expect("Failure to create buffer")
+        let (buf, alloc) = unsafe {
+            context
+                .vma_alloc
+                .create_buffer(&buffer_create_info, &vma_create_info)
+                .expect("Failure to create buffer")
         };
+
+        let mut buf_addr = 0;
+        if local_flags.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS) {
+            buf_addr = unsafe {
+                let bda_info = vk::BufferDeviceAddressInfo::default().buffer(buf);
+
+                context.device.get_buffer_device_address(&bda_info)
+            };
+        }
 
         Buffer {
             size: size,
             mem_alloc: alloc,
-            vk_buffer : buf
+            vk_buffer: buf,
+            buffer_address: buf_addr,
         }
     }
 
     pub fn destroy(&mut self, context: &VkContextData) {
         unsafe {
-            context.vma_alloc.destroy_buffer(self.vk_buffer, &mut self.mem_alloc);
+            context
+                .vma_alloc
+                .destroy_buffer(self.vk_buffer, &mut self.mem_alloc);
         }
     }
 }
