@@ -1,8 +1,7 @@
 use super::{vkutil, Engine};
 use ash::vk;
-use cgmath::{SquareMatrix, Vector3};
+use cgmath::SquareMatrix;
 use gltf;
-use std::fs::File;
 use std::path::Path;
 use std::u64;
 use std::rc::Rc;
@@ -80,7 +79,7 @@ impl Object {
             }
         }
 
-        if(iboentry.is_empty()) {
+        if iboentry.is_empty() {
             for i in 0..vboentry.len() {
                 iboentry.push(i as u32);
             }

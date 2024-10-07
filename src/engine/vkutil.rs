@@ -1,11 +1,6 @@
-use ash::{
-    khr::dynamic_rendering_local_read,
-    vk::{
-        self, AttachmentLoadOp, CommandBufferLevel, ComponentMapping, DeviceQueueCreateInfo,
-        Extent2D, Handle, Queue, QueueFlags, Rect2D,
-    },
-    Entry,
-};
+use ash::vk::{
+        self, QueueFlags,
+    };
 
 use std::fs::File;
 use std::path::Path;
@@ -130,14 +125,14 @@ impl VkContextData {
 
             for (index, pdqueue) in pdqueues.iter().enumerate() {
                 println!("Found queue : {:#?} at index {}", pdqueue, index);
-                if (pdqueue
+                if pdqueue
                     .queue_flags
                     .contains(QueueFlags::GRAPHICS | QueueFlags::COMPUTE)
-                    && gfx.is_none())
+                    && gfx.is_none()
                 {
                     gfx = Some(index.try_into().unwrap());
                 }
-                if (pdqueue.queue_flags.contains(QueueFlags::TRANSFER) && transfer.is_none()) {
+                if pdqueue.queue_flags.contains(QueueFlags::TRANSFER) && transfer.is_none() {
                     transfer = Some(index.try_into().unwrap());
                 }
 
@@ -443,8 +438,8 @@ impl Buffer {
         context: &VkContextData,
     ) -> Self {
         let mut local_flags = flags;
-        if (local_flags.contains(vk::BufferUsageFlags::STORAGE_BUFFER)
-            | local_flags.contains(vk::BufferUsageFlags::INDEX_BUFFER))
+        if local_flags.contains(vk::BufferUsageFlags::STORAGE_BUFFER)
+            | local_flags.contains(vk::BufferUsageFlags::INDEX_BUFFER)
         {
             local_flags |= vk::BufferUsageFlags::TRANSFER_DST;
             local_flags |= vk::BufferUsageFlags::TRANSFER_SRC;

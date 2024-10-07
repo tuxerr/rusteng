@@ -1,8 +1,7 @@
 use winit::{
-    application::ApplicationHandler, event::{Event, WindowEvent}, event_loop::{ControlFlow, EventLoop}, platform::x11::EventLoopBuilderExtX11, raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle}, window::Window
+    application::ApplicationHandler, event::WindowEvent, event_loop::{ControlFlow, EventLoop}, platform::x11::EventLoopBuilderExtX11, raw_window_handle::{HasDisplayHandle, RawDisplayHandle}, window::Window
 };
 
-use ash_window;
 
 pub mod engine;
 

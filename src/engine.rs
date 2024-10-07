@@ -7,9 +7,8 @@ const REQUIRED_DEVICE_EXTENSIONS: [*const i8; 2] = [
 ];
 const MAX_FRAMES_IN_FLIGHT: u32 = 3;
 
-use ash::vk::{self, Buffer, PipelineLayout};
+use ash::vk::{self, PipelineLayout};
 
-use gltf;
 use object::Object;
 use std::cmp;
 use std::rc::Rc;
@@ -227,7 +226,7 @@ impl Engine {
             }
         }
 
-        let mut present_mode = vk::PresentModeKHR::FIFO;
+        let present_mode = vk::PresentModeKHR::FIFO;
         /*for p in surf_present_modes {
             if p == vk::PresentModeKHR::MAILBOX {
                 present_mode = vk::PresentModeKHR::MAILBOX;
@@ -316,7 +315,7 @@ impl Engine {
 
     pub fn render(&mut self) {
         self.frame_index += 1;
-        if (self.frame_index > 5) {
+        if self.frame_index > 5 {
             return;
         }
 
