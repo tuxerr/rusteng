@@ -184,8 +184,9 @@ impl Engine {
             &self.context,
         ));
 
-        let fox_obj =
+        let mut fox_obj =
             object::Object::loadObjectInEngine(self, String::from("Fox"), fox_shader_pipeline);
+        fox_obj.transform = fox_obj.transform * Matrix4::from_scale(0.02f32);
         self.objects.push(fox_obj);
     }
 
@@ -546,7 +547,7 @@ impl Engine {
         let mut object_ssbo: Vec<shader_struct::ObjectEntry> = Vec::new();
         let proj_matrix = cgmath::perspective(Deg(45.0f32), aspect, 0.1f32, 10.0f32);
         let cam_transform = Matrix4::look_at_rh(
-            Point3::new(2.0f32, 2.0f32, 2.0f32),
+            Point3::new(-2.0f32, -2.0f32, 2.0f32),
             Point3::new(0.0f32, 0.0f32, 0.0f32),
             Vector3::new(0.0f32, 0.0f32, 1.0f32),
         );
