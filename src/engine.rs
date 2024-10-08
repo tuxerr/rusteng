@@ -413,10 +413,10 @@ impl Engine {
                     vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
                         | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
                 )
-                .image(image_acquired)
+                .image(self.depth_buffer.as_ref().unwrap().vk_image)
                 .subresource_range(
                     vk::ImageSubresourceRange::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .aspect_mask(vk::ImageAspectFlags::DEPTH)
                         .level_count(vk::REMAINING_MIP_LEVELS)
                         .layer_count(vk::REMAINING_ARRAY_LAYERS),
                 );

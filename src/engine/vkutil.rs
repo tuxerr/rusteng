@@ -74,13 +74,13 @@ impl VkContextData {
             );
         }
 
-        // let enabled_layer_names = [VKVALID_NAME.as_ptr()];
-        // if available_layers
-        //     .into_iter()
-        //     .any(|layer| layer.layer_name_as_c_str().unwrap().eq(VKVALID_NAME))
-        // {
-        //     instance_create_info = instance_create_info.enabled_layer_names(&enabled_layer_names);
-        // }
+        let enabled_layer_names = [VKVALID_NAME.as_ptr()];
+        if available_layers
+            .into_iter()
+            .any(|layer| layer.layer_name_as_c_str().unwrap().eq(VKVALID_NAME))
+        {
+            instance_create_info = instance_create_info.enabled_layer_names(&enabled_layer_names);
+        }
 
         // instance create
         let instance = unsafe {
