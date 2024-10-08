@@ -24,6 +24,7 @@ pub struct Engine {
     swapchain_extent: vk::Extent2D,
     swapchain_images: Vec<vk::Image>,
     swapchain_image_views: Vec<vk::ImageView>,
+    depth_buffer: Option<vkutil::Texture>,
     commandpools: Vec<vk::CommandPool>,
     semaphores: Vec<vk::Semaphore>,
     fences: Vec<vk::Fence>,
@@ -108,6 +109,7 @@ impl Engine {
             swapchain_extent: vk::Extent2D::default(),
             swapchain_images: Vec::new(),
             swapchain_image_views: Vec::new(),
+            depth_buffer: None,
             commandpools: Vec::new(),
             semaphores: Vec::new(),
             fences: Vec::new(),
@@ -321,13 +323,17 @@ impl Engine {
         self.swapchain = Some(swapchain);
         self.surface = Some(surface);
         self.swapchain_extent = swapchain_size;
+        self.depth_buffer = Some(vkutil::Texture::new_from_extent_format_and_flags(
+            swapchain_size,
+            vk::Format::D32_SFLOAT,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
+            &self.context,
+        ));
     }
 
     pub fn render(&mut self) {
         self.frame_index += 1;
-        if self.frame_index > 5 {
-            return;
-        }
 
         let frame_indexer = (self.frame_index % MAX_FRAMES_IN_FLIGHT as i64) as usize;
         let dynrend_loader =
@@ -399,14 +405,30 @@ impl Engine {
                         .layer_count(vk::REMAINING_ARRAY_LAYERS),
                 );
 
+            let depth_barrier = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(
+                    vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                )
+                .image(image_acquired)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .level_count(vk::REMAINING_MIP_LEVELS)
+                        .layer_count(vk::REMAINING_ARRAY_LAYERS),
+                );
+
             self.context.device.cmd_pipeline_barrier(
                 commandbuffer,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
                 vk::DependencyFlags::empty(),
                 &[],
                 &[],
-                &[image_barrier],
+                &[image_barrier, depth_barrier],
             );
         }
 
@@ -415,18 +437,29 @@ impl Engine {
             let color_attachments = [vk::RenderingAttachmentInfoKHR::default()
                 .clear_value(vk::ClearValue {
                     color: vk::ClearColorValue {
-                        float32: [1.0, 0.4, 0.4, 1.0],
+                        float32: [0.0, 0.0, 0.0, 0.0],
                     },
                 })
                 .image_layout(vk::ImageLayout::ATTACHMENT_OPTIMAL)
                 .image_view(image_view_acquired)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
                 .store_op(vk::AttachmentStoreOp::STORE)];
-
+            let depth_attachment = vk::RenderingAttachmentInfoKHR::default()
+                .clear_value(vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: 1.0f32,
+                        stencil: 0
+                    },
+                })
+                .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                .image_view(self.depth_buffer.as_ref().unwrap().vk_imageview)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE);
             dynrend_loader.cmd_begin_rendering(
                 commandbuffer,
                 &vk::RenderingInfoKHR::default()
                     .color_attachments(&color_attachments)
+                    .depth_attachment(&depth_attachment)
                     .render_area(vk::Rect2D::default().extent(self.swapchain_extent))
                     .layer_count(1),
             )
@@ -531,7 +564,7 @@ impl Engine {
             let push_constant_addresses = [
                 self.global_vbo.buffer_address,
                 //frame_data.scene_buffer.buffer_address,
-                self.staging_buf.buffer_address
+                self.staging_buf.buffer_address,
             ];
             let push_constant_addresses_u8: [u8; 16] = std::mem::transmute(push_constant_addresses);
 
@@ -595,5 +628,11 @@ impl Drop for Engine {
         self.global_ibo.destroy(&self.context);
         self.global_vbo.destroy(&self.context);
         self.staging_buf.destroy(&self.context);
+        for buf in &mut self.scene_buffers {
+            buf.destroy(&self.context);
+        }
+        if let Some(depth_buffer) = &mut self.depth_buffer {
+            depth_buffer.destroy(&self.context);
+        }
     }
 }

@@ -1,6 +1,7 @@
 use ash::vk::{
-        self, QueueFlags,
-    };
+    self, ImageAspectFlags, ImageLayout, ImageTiling, ImageType, QueueFlags, SampleCountFlags,
+};
+use winit::event::ElementState;
 
 use std::fs::File;
 use std::path::Path;
@@ -73,32 +74,13 @@ impl VkContextData {
             );
         }
 
-        for layer in &available_layers {
-            println!("Layer : {:#?}", layer.layer_name_as_c_str().unwrap());
-            println!("Layer prop : {:#?}", layer);
-            let available_extensions = unsafe {
-                entry
-                    .enumerate_instance_extension_properties(Some(
-                        layer.layer_name_as_c_str().unwrap(),
-                    ))
-                    .expect("Failure to fetch extensions")
-            };
-            for (index, ext) in available_extensions.iter().enumerate() {
-                println!(
-                    "Extension {} is {:#?}",
-                    index,
-                    ext.extension_name_as_c_str().unwrap()
-                );
-            }
-        }
-
-        let enabled_layer_names = [VKVALID_NAME.as_ptr()];
-        if available_layers
-            .into_iter()
-            .any(|layer| layer.layer_name_as_c_str().unwrap().eq(VKVALID_NAME))
-        {
-            instance_create_info = instance_create_info.enabled_layer_names(&enabled_layer_names);
-        }
+        // let enabled_layer_names = [VKVALID_NAME.as_ptr()];
+        // if available_layers
+        //     .into_iter()
+        //     .any(|layer| layer.layer_name_as_c_str().unwrap().eq(VKVALID_NAME))
+        // {
+        //     instance_create_info = instance_create_info.enabled_layer_names(&enabled_layer_names);
+        // }
 
         // instance create
         let instance = unsafe {
@@ -162,7 +144,7 @@ impl VkContextData {
             (
                 physical_devices[0],
                 (gfx.unwrap(), transfer.unwrap(), present.unwrap()),
-                pdfeatures
+                pdfeatures,
             )
         };
 
@@ -181,10 +163,12 @@ impl VkContextData {
             vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
         let mut enable_bda =
             vk::PhysicalDeviceBufferDeviceAddressFeatures::default().buffer_device_address(true);
-        let mut enable_variablepointers =
-            vk::PhysicalDeviceVariablePointersFeatures::default().variable_pointers(true).variable_pointers_storage_buffer(true);
-        let mut enable_shaderint64 = 
-            vk::PhysicalDeviceShaderAtomicInt64Features::default().shader_buffer_int64_atomics(true).shader_shared_int64_atomics(true);
+        let mut enable_variablepointers = vk::PhysicalDeviceVariablePointersFeatures::default()
+            .variable_pointers(true)
+            .variable_pointers_storage_buffer(true);
+        let mut enable_shaderint64 = vk::PhysicalDeviceShaderAtomicInt64Features::default()
+            .shader_buffer_int64_atomics(true)
+            .shader_shared_int64_atomics(true);
 
         let mut physicalfeatures2 = vk::PhysicalDeviceFeatures2::default()
             .push_next(&mut enable_dynrender)
@@ -370,7 +354,7 @@ impl Pipeline {
 
         let raster_state = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
-            .cull_mode(vk::CullModeFlags::BACK)
+            .cull_mode(vk::CullModeFlags::FRONT)
             .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
             .line_width(1.0f32);
 
@@ -384,7 +368,7 @@ impl Pipeline {
 
         // opaque draw
         let color_blend_attachments =
-            [vk::PipelineColorBlendAttachmentState::default().blend_enable(false)];
+            [vk::PipelineColorBlendAttachmentState::default().blend_enable(false).color_write_mask(vk::ColorComponentFlags::RGBA)];
         let color_blend_state =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
 
@@ -489,6 +473,90 @@ impl Buffer {
             context
                 .vma_alloc
                 .destroy_buffer(self.vk_buffer, &mut self.mem_alloc);
+        }
+    }
+}
+
+pub struct Texture {
+    pub extent: vk::Extent2D,
+    pub mem_alloc: vk_mem::Allocation,
+    pub vk_image: vk::Image,
+    pub vk_imageview: vk::ImageView,
+}
+
+impl Texture {
+    pub fn new_from_extent_format_and_flags(
+        extent: vk::Extent2D,
+        format: vk::Format,
+        usage_flags: vk::ImageUsageFlags,
+        vma_flags: vk_mem::AllocationCreateFlags,
+        context: &VkContextData,
+    ) -> Self {
+        let (initial_layout, aspect) = if format == vk::Format::D32_SFLOAT {
+            (
+                ImageLayout::UNDEFINED,
+                ImageAspectFlags::DEPTH,
+            )
+        } else {
+            (ImageLayout::UNDEFINED, ImageAspectFlags::COLOR)
+        };
+
+        let image_create_info = vk::ImageCreateInfo::default()
+            .image_type(ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D { width: extent.width, height: extent.height, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(SampleCountFlags::TYPE_1)
+            .tiling(ImageTiling::OPTIMAL)
+            .usage(usage_flags)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(initial_layout);
+
+        let vma_create_info = vk_mem::AllocationCreateInfo {
+            usage: vk_mem::MemoryUsage::Auto,
+            flags: vma_flags,
+            ..Default::default()
+        };
+
+        let (image, alloc) = unsafe {
+            context
+                .vma_alloc
+                .create_image(&image_create_info, &vma_create_info)
+                .expect("Failure to create image")
+        };
+
+        let img_view_create = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(aspect)
+                    .layer_count(1)
+                    .level_count(1),
+            );
+
+        let img_view = unsafe {
+            context
+                .device
+                .create_image_view(&img_view_create, None)
+                .expect("Failure to create image view")
+        };
+
+        Texture {
+            extent: extent,
+            mem_alloc: alloc,
+            vk_image: image,
+            vk_imageview: img_view,
+        }
+    }
+
+    pub fn destroy(&mut self, context: &VkContextData) {
+        unsafe {
+            context
+                .vma_alloc
+                .destroy_image(self.vk_image, &mut self.mem_alloc);
         }
     }
 }
