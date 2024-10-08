@@ -3,28 +3,30 @@ struct VertexStageOutput
     float4          sv_position     : SV_Position;
 };
 
-struct AssembledVertex
+struct VertexEntry
 {
     float4 v1; //position = v1.xyz, normal = (v1.w,v2.xy), uv = v2.zw
     float4 v2;
+    float3 getPosition() {
+        return v1.xyz;
+    }
+    float3 getNormal() {
+        return float3(v1.w,v2.xy);
+    }
+    float2 getUV() {
+        return v2.zw;
+    }
 };
 
-struct SceneData
+struct ObjectEntry
 {
-
+    float4x4 modelViewProj;
 }
-
-//this is shadowing rust's object.rs
-//struct VertexEntry {
-//    pub pos: cgmath::Vector3<f32>,
-//    pub norm: cgmath::Vector3<f32>,
-//    pub uv: cgmath::Vector2<f32>,
-//}
 
 [vk::push_constant]
 cbuffer Constants {
-    ConstBufferPointer<AssembledVertex> vbo;
-    ConstBufferPointer<SceneData> vbo2;
+    ConstBufferPointer<VertexEntry> vbo;
+    ConstBufferPointer<ObjectEntry> objects;
 };
 
 [shader("vertex")]
@@ -32,8 +34,8 @@ VertexStageOutput vertexMain(
     uint vid : SV_VertexID)
 {
     VertexStageOutput output;
-    AssembledVertex av = vbo[vid];
-    output.sv_position = float4(av.v1.xyz,1.0);
+    VertexEntry av = vbo[vid];
+    output.sv_position = mul(objects[0].modelViewProj,float4(av.getPosition(),1.0));
 
     return output;
 }

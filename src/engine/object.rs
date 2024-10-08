@@ -1,4 +1,4 @@
-use super::{vkutil, Engine};
+use super::{vkutil, Engine, shader_struct::VertexEntry, shader_struct::ObjectEntry};
 use ash::vk;
 use cgmath::SquareMatrix;
 use gltf;
@@ -19,13 +19,6 @@ pub struct Object {
     pub ibo_slice: BufferSlice,
     pub vbo_slice: BufferSlice,
     pub pipeline: Rc<vkutil::Pipeline>,
-}
-
-#[repr(C)]
-struct VertexEntry {
-    pub pos: cgmath::Vector3<f32>,
-    pub norm: cgmath::Vector3<f32>,
-    pub uv: cgmath::Vector2<f32>,
 }
 
 impl Object {

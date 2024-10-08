@@ -1,4 +1,5 @@
 pub mod object;
+pub mod shader_struct;
 pub mod vkutil;
 
 const REQUIRED_DEVICE_EXTENSIONS: [*const i8; 2] = [
@@ -9,6 +10,7 @@ const MAX_FRAMES_IN_FLIGHT: u32 = 3;
 
 use ash::vk::{self, PipelineLayout};
 
+use cgmath::{Deg, Matrix4, Point3, Rad, Vector3};
 use object::Object;
 use std::cmp;
 use std::rc::Rc;
@@ -26,10 +28,10 @@ pub struct Engine {
     semaphores: Vec<vk::Semaphore>,
     fences: Vec<vk::Fence>,
     objects: Vec<Object>,
+    scene_buffers: Vec<vkutil::Buffer>,
     opaque_layout: PipelineLayout,
     global_ibo: vkutil::Buffer,
     global_vbo: vkutil::Buffer,
-    global_scene: vkutil::Buffer,
     staging_buf: vkutil::Buffer,
 }
 
@@ -37,6 +39,7 @@ struct FrameData<'a> {
     commandpool: vk::CommandPool,
     semaphores: &'a [vk::Semaphore],
     fence: vk::Fence,
+    scene_buffer: &'a vkutil::Buffer,
 }
 
 impl<'a> FrameData<'_> {
@@ -45,6 +48,7 @@ impl<'a> FrameData<'_> {
             commandpool: engine.commandpools[1 + indexer],
             semaphores: &engine.semaphores[1 + indexer * 2..indexer * 2 + 3],
             fence: engine.fences[1 + indexer],
+            scene_buffer: &engine.scene_buffers[indexer],
         }
     }
 }
@@ -71,12 +75,7 @@ impl Engine {
             vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
             &context,
         );
-        let global_scene = vkutil::Buffer::new_from_size_and_flags(
-            1 * 1024 * 1024 * MAX_FRAMES_IN_FLIGHT as usize,
-            vk::BufferUsageFlags::STORAGE_BUFFER,
-            vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
-            &context,
-        );
+
         let staging_buf = vkutil::Buffer::new_from_size_and_flags(
             8 * 1024 * 1024,
             vk::BufferUsageFlags::STORAGE_BUFFER,
@@ -113,10 +112,10 @@ impl Engine {
             semaphores: Vec::new(),
             fences: Vec::new(),
             objects: Vec::new(),
+            scene_buffers: Vec::new(),
             opaque_layout: opaque_mesh_pushconstant_layout,
             global_ibo,
             global_vbo,
-            global_scene,
             staging_buf,
         };
 
@@ -128,6 +127,16 @@ impl Engine {
     fn render_init(&mut self) {
         println!("Initializing engine datastructures");
         let structure_depth = MAX_FRAMES_IN_FLIGHT + 1;
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            let global_scene = vkutil::Buffer::new_from_size_and_flags(
+                1 * 1024 * 1024 as usize,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
+                &self.context,
+            );
+            self.scene_buffers.push(global_scene);
+        }
+
         for _ in 0..structure_depth {
             let cmdpool_create_info = vk::CommandPoolCreateInfo::default()
                 .queue_family_index(self.context.queues.gfx_queue_idx)
@@ -423,7 +432,7 @@ impl Engine {
         }
 
         // actual render work
-        self.render_scene(&commandbuffer);
+        self.render_scene(&commandbuffer, &frame_data);
 
         // end dynamic rendering
         unsafe {
@@ -495,17 +504,14 @@ impl Engine {
         }
     }
 
-    fn render_scene(&self, commandbuffer: &vk::CommandBuffer) {
+    fn render_scene(&self, commandbuffer: &vk::CommandBuffer, frame_data: &FrameData) {
         //scene rendering
         let viewport = vk::Viewport::default()
             .max_depth(1.0f32)
             .width(self.swapchain_extent.width as f32)
             .height(self.swapchain_extent.height as f32);
         let scissor = vk::Rect2D::default().extent(self.swapchain_extent);
-
-        pub fn convert(data: &[u32; 4]) -> [u8; 16] {
-            unsafe { std::mem::transmute(*data) }
-        }
+        let aspect = self.swapchain_extent.width as f32 / self.swapchain_extent.height as f32;
 
         unsafe {
             self.context
@@ -523,9 +529,10 @@ impl Engine {
 
             let push_constant_addresses = [
                 self.global_vbo.buffer_address,
-                self.global_scene.buffer_address
+                //frame_data.scene_buffer.buffer_address,
+                self.staging_buf.buffer_address
             ];
-            let push_constant_addresses_u8 : [u8; 16] = std::mem::transmute(push_constant_addresses);
+            let push_constant_addresses_u8: [u8; 16] = std::mem::transmute(push_constant_addresses);
 
             self.context.device.cmd_push_constants(
                 *commandbuffer,
@@ -533,6 +540,35 @@ impl Engine {
                 vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 0,
                 &push_constant_addresses_u8[..],
+            );
+        }
+
+        let mut object_ssbo: Vec<shader_struct::ObjectEntry> = Vec::new();
+        let proj_matrix = cgmath::perspective(Deg(45.0f32), aspect, 0.1f32, 10.0f32);
+        let cam_transform = Matrix4::look_at_rh(
+            Point3::new(2.0f32, 2.0f32, 2.0f32),
+            Point3::new(0.0f32, 0.0f32, 0.0f32),
+            Vector3::new(0.0f32, 0.0f32, 1.0f32),
+        );
+
+        for obj in &self.objects {
+            let mvp = proj_matrix * cam_transform * obj.transform;
+            let obj_entry = shader_struct::ObjectEntry {
+                model_view_projection: mvp,
+            };
+            object_ssbo.push(obj_entry);
+        }
+
+        let alloc_ptr = self
+            .context
+            .vma_alloc
+            .get_allocation_info(&self.staging_buf.mem_alloc)
+            .mapped_data;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                object_ssbo.as_ptr(),
+                alloc_ptr as *mut shader_struct::ObjectEntry,
+                object_ssbo.len(),
             );
         }
 
