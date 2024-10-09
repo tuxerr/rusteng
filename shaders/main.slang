@@ -1,7 +1,12 @@
 struct VertexStageOutput
 {
+    CoarseVertex       coarseVertex : CoarseVertex;
     float4          sv_position     : SV_Position;
 };
+
+struct CoarseVertex {
+    float2 uv;
+}
 
 struct VertexEntry
 {
@@ -23,6 +28,9 @@ struct ObjectEntry
     float4x4 modelViewProj;
 }
 
+[vk::binding(0, 0)] 
+Sampler2D bindlessTextures[10];
+
 [vk::push_constant]
 cbuffer Constants {
     ConstBufferPointer<VertexEntry> vbo;
@@ -35,13 +43,14 @@ VertexStageOutput vertexMain(
 {
     VertexStageOutput output;
     VertexEntry av = vbo[vid];
-    output.sv_position = mul(objects[0].modelViewProj,float4(av.getPosition(),1.0));
+    output.sv_position = mul(objects[0].modelViewProj, float4(av.getPosition(), 1.0));
+    output.coarseVertex.uv = av.getUV();
 
     return output;
 }
 
 [shader("fragment")]
-float4 fragmentMain() : SV_Target
+float4 fragmentMain(CoarseVertex coarseVertex: CoarseVertex) : SV_Target
 {
-    return float4(1.0, 0.0, 1.0, 1.0);
+    return bindlessTextures[0].Sample(coarseVertex.uv);
 }

@@ -1,5 +1,5 @@
 use ash::vk::{
-    self, ImageAspectFlags, ImageLayout, ImageTiling, ImageType, QueueFlags, SampleCountFlags,
+    self, ImageAspectFlags, ImageLayout, ImageTiling, ImageType, PipelineLayout, QueueFlags, SampleCountFlags
 };
 use winit::event::ElementState;
 
@@ -92,14 +92,12 @@ impl VkContextData {
         // let surfacekhr_win32_loader = ash::khr::win32_surface::Instance::new(&entry, &instance);
 
         // physical device create and queue retrieval
-        let (physical_device, (gfxqidx, transferqidx, presentqidx), pdfeatures) = unsafe {
+        let (physical_device, (gfxqidx, transferqidx, presentqidx)) = unsafe {
             let physical_devices = instance
                 .enumerate_physical_devices()
                 .expect("Failure to enumerate PDs");
             let pd = physical_devices[0];
 
-            let pdprop = instance.get_physical_device_properties(pd);
-            let pdfeatures = instance.get_physical_device_features(pd);
             let pdqueues = instance.get_physical_device_queue_family_properties(pd);
             let mut gfx: Option<u32> = None;
             let mut transfer: Option<u32> = None;
@@ -143,10 +141,15 @@ impl VkContextData {
             // );
             (
                 physical_devices[0],
-                (gfx.unwrap(), transfer.unwrap(), present.unwrap()),
-                pdfeatures,
+                (gfx.unwrap(), transfer.unwrap(), present.unwrap())
             )
         };
+
+        let mut descriptor_indexing_features = vk::PhysicalDeviceDescriptorIndexingFeatures::default();
+        let mut pdfeatures2 = vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut descriptor_indexing_features);
+
+        unsafe { instance.get_physical_device_features2(physical_device, &mut pdfeatures2); };
 
         // device create
         let gfx_queue_create_info = [vk::DeviceQueueCreateInfo::default()
@@ -175,7 +178,7 @@ impl VkContextData {
             .push_next(&mut enable_bda)
             .push_next(&mut enable_variablepointers)
             .push_next(&mut enable_shaderint64)
-            .features(pdfeatures);
+            .push_next(&mut descriptor_indexing_features);
 
         let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&gfx_queue_create_info)
@@ -303,26 +306,11 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    pub fn load_gfx_pipeline_from_name(name: &String, context: &VkContextData) -> Self {
+    pub fn load_gfx_pipeline_from_name_and_layout(name: &String, context: &VkContextData, layout: &PipelineLayout) -> Self {
         let vs = Shader::loadFromNameAndType(&name, ShaderType::VERTEX, context);
         let fs = Shader::loadFromNameAndType(&name, ShaderType::FRAGMENT, context);
 
         let shadername = CString::new("main").unwrap();
-
-        let opaque_mesh_layout = unsafe {
-            let push_constant_ranges = [
-                vk::PushConstantRange::default()
-                    .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
-                    .offset(0)
-                    .size(16), // 2 buffer device addresses for mesh and object data
-            ];
-            let layout_create_info =
-                vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push_constant_ranges);
-            context
-                .device
-                .create_pipeline_layout(&layout_create_info, None)
-                .expect("Failure to create pipeline layout")
-        };
 
         let stages = [
             vk::PipelineShaderStageCreateInfo::default()
@@ -390,7 +378,7 @@ impl Pipeline {
             .depth_stencil_state(&depth_stencil_state)
             .color_blend_state(&color_blend_state)
             .dynamic_state(&dynamic_state)
-            .layout(opaque_mesh_layout)
+            .layout(*layout)
             .push_next(&mut rendering_state);
 
         let gfxpipe = unsafe {
@@ -482,6 +470,8 @@ pub struct Texture {
     pub mem_alloc: vk_mem::Allocation,
     pub vk_image: vk::Image,
     pub vk_imageview: vk::ImageView,
+    pub vk_sampler: vk::Sampler,
+    pub bindless_handle: Option<u32>
 }
 
 impl Texture {
@@ -544,11 +534,32 @@ impl Texture {
                 .expect("Failure to create image view")
         };
 
+        let sampler_create_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .mip_lod_bias(0.0f32)
+            .anisotropy_enable(false)
+            .max_anisotropy(1.0f32)
+            .compare_enable(false)
+            .min_lod(0.0f32)
+            .max_lod(vk::LOD_CLAMP_NONE)
+            .unnormalized_coordinates(false);
+
+        let sampler = unsafe {
+            context.device.create_sampler(&sampler_create_info, None).expect("Failure to create sampler")
+        };
+
         Texture {
             extent: extent,
             mem_alloc: alloc,
             vk_image: image,
             vk_imageview: img_view,
+            vk_sampler: sampler,
+            bindless_handle: None
         }
     }
 

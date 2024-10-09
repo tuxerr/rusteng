@@ -173,8 +173,6 @@ impl Object {
                 alloc_ptr = alloc_ptr.offset(copyvec.len() as isize);
                 texture_staging_sizes.push(copyvec.len() as isize);
             }
-            //eng.context.vma_alloc.flush_allocation(&eng.staging_buf.mem_alloc, 0, (vbo_size + ibo_size) as vk::DeviceSize).expect("Failure to flush");
-            //eng.context.vma_alloc.unmap_memory(&mut eng.staging_buf.mem_alloc);
         }
 
         let commandbuffer = eng
@@ -252,6 +250,26 @@ impl Object {
                 );
 
                 cur_offset += texture_staging_sizes[idx] as u64;
+
+                //write into bindless descriptorset and increment global handle
+                let image_info = [
+                    vk::DescriptorImageInfo::default()
+                        .image_layout(vk::ImageLayout::GENERAL)
+                        .image_view(tex.vk_imageview)
+                        .sampler(tex.vk_sampler)
+                ];
+                let descriptor_write = [
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(eng.bindless_texture_descriptorset)
+                        .dst_binding(0)
+                        .dst_array_element(eng.bindless_handle)
+                        .descriptor_count(1)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&image_info)
+                ];
+
+                eng.context.device.update_descriptor_sets(&descriptor_write, &[]);
+                eng.bindless_handle+=1;
             }
 
             eng.context

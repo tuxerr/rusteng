@@ -7,8 +7,9 @@ const REQUIRED_DEVICE_EXTENSIONS: [*const i8; 2] = [
     ash::khr::dynamic_rendering::NAME.as_ptr(),
 ];
 const MAX_FRAMES_IN_FLIGHT: u32 = 3;
+const MAX_BINDLESS_TEXTURES: u32 = 100000;
 
-use ash::vk::{self, PipelineLayout};
+use ash::vk::{self, DescriptorSetLayout, PipelineLayout};
 
 use cgmath::{Deg, Matrix4, Point3, Rad, Vector3};
 use object::Object;
@@ -31,6 +32,9 @@ pub struct Engine {
     objects: Vec<Object>,
     scene_buffers: Vec<vkutil::Buffer>,
     opaque_layout: PipelineLayout,
+    bindless_texture_descriptorset_layout: vk::DescriptorSetLayout,
+    bindless_texture_descriptorset: vk::DescriptorSet,
+    bindless_handle: u32,
     global_ibo: vkutil::Buffer,
     global_vbo: vkutil::Buffer,
     staging_buf: vkutil::Buffer,
@@ -70,6 +74,7 @@ impl Engine {
             vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
             &context,
         );
+
         let global_vbo = vkutil::Buffer::new_from_size_and_flags(
             16 * 1024 * 1024,
             vk::BufferUsageFlags::STORAGE_BUFFER,
@@ -85,22 +90,66 @@ impl Engine {
             &context,
         );
 
-        //default engine-wide push constant layouts
-        let opaque_mesh_pushconstant_layout = unsafe {
-            let push_constant_ranges = [
-                vk::PushConstantRange::default()
-                    .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
-                    .offset(0)
-                    .size(16), // 2 buffer device addresses for mesh and object data
-            ];
-            let layout_create_info =
-                vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push_constant_ranges);
+        let descriptor_set_layout_bindings = [vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_count(MAX_BINDLESS_TEXTURES) // upper bound only, variable descriptor count
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)];
+
+        let extended_info_binding = [vk::DescriptorBindingFlags::PARTIALLY_BOUND
+            | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND];
+        let mut descriptorset_layout_extended_info =
+            vk::DescriptorSetLayoutBindingFlagsCreateInfo::default()
+                .binding_flags(&extended_info_binding);
+        let descriptorset_layout_create_info = vk::DescriptorSetLayoutCreateInfo::default()
+            .bindings(&descriptor_set_layout_bindings)
+            .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
+            .push_next(&mut descriptorset_layout_extended_info);
+
+        let bindless_texture_descriptorset_layouts = [unsafe {
             context
                 .device
-                .create_pipeline_layout(&layout_create_info, None)
-                .expect("Failure to create pipeline layout")
-        };
+                .create_descriptor_set_layout(&descriptorset_layout_create_info, None)
+                .expect("Failure to create bindless descriptorset layout")
+        }];
 
+        //default engine-wide push constant layouts
+        let push_constant_ranges = [
+            vk::PushConstantRange::default()
+                .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+                .offset(0)
+                .size(16), // 2 buffer device addresses for mesh and object data
+        ];
+
+        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::default()
+            .push_constant_ranges(&push_constant_ranges)
+            .set_layouts(&bindless_texture_descriptorset_layouts);
+
+        let descriptor_pool_sizes = [vk::DescriptorPoolSize::default().descriptor_count(MAX_BINDLESS_TEXTURES).ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)];
+        let descriptor_pool_create_info = vk::DescriptorPoolCreateInfo::default()
+            .flags(vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND)
+            .max_sets(1)
+            .pool_sizes(&descriptor_pool_sizes);
+
+        
+        let opaque_mesh_layout = unsafe {
+                context
+                    .device
+                    .create_pipeline_layout(&pipeline_layout_create_info, None)
+                    .expect("Failure to create pipeline layout")
+            };
+
+        let (descriptor_pool,descriptor_set) = unsafe { 
+            let pool = context.device.create_descriptor_pool(&descriptor_pool_create_info, None).expect("Failure to create descriptor pool!");
+            
+            let descriptor_set_allocinfo = vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(pool)
+                .set_layouts(&bindless_texture_descriptorset_layouts);
+
+            let set = context.device.allocate_descriptor_sets(&descriptor_set_allocinfo).expect("Failure to allocate bindless descriptor set")[0];
+            (pool,set)
+        };
+        
         let mut eng = Engine {
             frame_index: 0,
             context: context,
@@ -115,7 +164,10 @@ impl Engine {
             fences: Vec::new(),
             objects: Vec::new(),
             scene_buffers: Vec::new(),
-            opaque_layout: opaque_mesh_pushconstant_layout,
+            opaque_layout: opaque_mesh_layout,
+            bindless_texture_descriptorset_layout: bindless_texture_descriptorset_layouts[0],
+            bindless_texture_descriptorset: descriptor_set,
+            bindless_handle: 0,
             global_ibo,
             global_vbo,
             staging_buf,
@@ -181,14 +233,16 @@ impl Engine {
 
     fn scene_init(&mut self) {
         let fox_shader_name = String::from("main");
-        let fox_shader_pipeline = Rc::new(vkutil::Pipeline::load_gfx_pipeline_from_name(
+        let fox_shader_pipeline = Rc::new(vkutil::Pipeline::load_gfx_pipeline_from_name_and_layout(
             &fox_shader_name,
             &self.context,
+            &self.opaque_layout
         ));
 
         let mut fox_obj =
             object::Object::loadObjectInEngine(self, String::from("Fox"), fox_shader_pipeline);
         fox_obj.transform = fox_obj.transform * Matrix4::from_scale(0.02f32);
+        fox_obj.transform = fox_obj.transform * Matrix4::from_angle_y(Deg(-90f32));
         self.objects.push(fox_obj);
     }
 
@@ -239,11 +293,6 @@ impl Engine {
         }
 
         let present_mode = vk::PresentModeKHR::FIFO;
-        /*for p in surf_present_modes {
-            if p == vk::PresentModeKHR::MAILBOX {
-                present_mode = vk::PresentModeKHR::MAILBOX;
-            }
-        }*/
 
         assert!(
             surf_capabilities
@@ -423,8 +472,12 @@ impl Engine {
 
             self.context.device.cmd_pipeline_barrier(
                 commandbuffer,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
                 vk::DependencyFlags::empty(),
                 &[],
                 &[],
@@ -448,7 +501,7 @@ impl Engine {
                 .clear_value(vk::ClearValue {
                     depth_stencil: vk::ClearDepthStencilValue {
                         depth: 1.0f32,
-                        stencil: 0
+                        stencil: 0,
                     },
                 })
                 .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
@@ -575,12 +628,20 @@ impl Engine {
                 0,
                 &push_constant_addresses_u8[..],
             );
+
+            // bind bindless descriptorset
+            self.context.device.cmd_bind_descriptor_sets(
+                *commandbuffer, 
+                vk::PipelineBindPoint::GRAPHICS, 
+                self.opaque_layout, 
+                0, 
+                &[self.bindless_texture_descriptorset], &[]);
         }
 
         let mut object_ssbo: Vec<shader_struct::ObjectEntry> = Vec::new();
         let proj_matrix = cgmath::perspective(Deg(45.0f32), aspect, 0.1f32, 10.0f32);
         let cam_transform = Matrix4::look_at_rh(
-            Point3::new(-2.0f32, -2.0f32, 2.0f32),
+            Point3::new(0.0f32, -2.0f32, 2.0f32),
             Point3::new(0.0f32, 0.0f32, 0.0f32),
             Vector3::new(0.0f32, 0.0f32, 1.0f32),
         );
@@ -625,14 +686,24 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
+        unsafe {
+            self.context
+                .device
+                .wait_for_fences(self.fences.as_slice(), true, u64::MAX)
+                .expect("Failure to wait on end-of-engine fence");
+        }
+
         self.global_ibo.destroy(&self.context);
         self.global_vbo.destroy(&self.context);
         self.staging_buf.destroy(&self.context);
-        for buf in &mut self.scene_buffers {
-            buf.destroy(&self.context);
-        }
+        self.scene_buffers.iter_mut().for_each(|b| b.destroy(&self.context));
+
         if let Some(depth_buffer) = &mut self.depth_buffer {
             depth_buffer.destroy(&self.context);
         }
+
+        self.objects.iter_mut().for_each(|o| {
+            o.textures.iter_mut().for_each(|t| t.destroy(&self.context));
+        });
     }
 }
