@@ -22,12 +22,16 @@ fn main() {
 
             Command::new("slangc")
                 .args(&[shader_name.as_str(), "-profile", "sm_6_0", "-entry", "vertexMain", "-target", "spirv", "-o"])
-                .arg(&format!("vs{}.o", shader_name_noext))
-                .output().expect("slang failure");
+                .arg(&format!("vs{}.o", shader_name_noext)).spawn().expect("slang VS failure").wait().expect("Failure to wait");
 
             Command::new("slangc")
                 .args(&[shader_name.as_str(), "-profile", "sm_6_0", "-entry", "fragmentMain", "-target", "spirv", "-o"])
                 .arg(&format!("fs{}.o", shader_name_noext))
-                .output().expect("slang failure"); 
+                .spawn().expect("slang FS failure").wait().expect("Failure to wait");
+
+            Command::new("slangc")
+                .args(&[shader_name.as_str(), "-profile", "sm_6_0", "-entry", "computeMain", "-target", "spirv", "-o"])
+                .arg(&format!("cs{}.o", shader_name_noext))
+                .spawn().expect("slang CS failure").wait().expect("Failure to wait");
         });
 }

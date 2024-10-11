@@ -1,5 +1,7 @@
 #define MAX_HANDLE 200000
 
+import shader_struct;
+
 struct VertexStageOutput
 {
     CoarseVertex       coarseVertex : CoarseVertex;
@@ -11,39 +13,15 @@ struct CoarseVertex {
     uint iid;
 };
 
-struct VertexEntry
-{
-    float4 v1; //position = v1.xyz, normal = (v1.w,v2.xy), uv = v2.zw
-    float4 v2;
-    float3 getPosition() {
-        return v1.xyz;
-    }
-    float3 getNormal() {
-        return float3(v1.w,v2.xy);
-    }
-    float2 getUV() {
-        return v2.zw;
-    }
-};
-
-struct ObjectEntry
-{
-    float4x4 modelViewProj;
-    uint vbo_offset;
-    uint albedo_handle;
-    uint metallic_roughness_handle;
-    uint occlusion_handle;
-    uint normal_handle;
-    uint emissive_handle;
-}
-
 [vk::binding(0, 0)] 
-Sampler2D bindlessTextures[]; 
+Sampler2D bindlessTextures[];
 
 [vk::push_constant]
 cbuffer Constants {
+    uint64_t objectCount;
     ConstBufferPointer<VertexEntry> vbo;
     ConstBufferPointer<ObjectEntry> objects;
+    DrawBuffer *drawbuf;
 };
 
 [shader("vertex")]

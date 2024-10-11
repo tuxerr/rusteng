@@ -45,7 +45,7 @@ impl VkContextData {
             p_application_name: VKAPP_NAME.as_ptr().cast(),
             ..Default::default()
         };
-        let instance_create_info = vk::InstanceCreateInfo {
+        let mut instance_create_info = vk::InstanceCreateInfo {
             p_application_info: &app_info,
             ..Default::default()
         }
@@ -75,13 +75,13 @@ impl VkContextData {
             );
         }
 
-        // let enabled_layer_names = [VKVALID_NAME.as_ptr()];
-        // if available_layers
-        //     .into_iter()
-        //     .any(|layer| layer.layer_name_as_c_str().unwrap().eq(VKVALID_NAME))
-        // {
-        //     instance_create_info = instance_create_info.enabled_layer_names(&enabled_layer_names);
-        // }
+        let enabled_layer_names = [VKVALID_NAME.as_ptr()];
+        if available_layers
+            .into_iter()
+            .any(|layer| layer.layer_name_as_c_str().unwrap().eq(VKVALID_NAME))
+        {
+            instance_create_info = instance_create_info.enabled_layer_names(&enabled_layer_names);
+        }
 
         // instance create
         let instance = unsafe {
@@ -146,11 +146,12 @@ impl VkContextData {
             )
         };
 
-        let mut descriptor_indexing_features = vk::PhysicalDeviceDescriptorIndexingFeatures::default();
+        let mut pd12features = vk::PhysicalDeviceVulkan12Features::default();
         let mut pdfeatures2 = vk::PhysicalDeviceFeatures2::default()
-            .push_next(&mut descriptor_indexing_features);
+            .push_next(&mut pd12features);
 
         unsafe { instance.get_physical_device_features2(physical_device, &mut pdfeatures2); };
+        let pd_features = unsafe { instance.get_physical_device_features(physical_device) };
 
         // device create
         let gfx_queue_create_info = [vk::DeviceQueueCreateInfo::default()
@@ -165,21 +166,15 @@ impl VkContextData {
         // enable dynamic rendering feature
         let mut enable_dynrender =
             vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
-        let mut enable_bda =
-            vk::PhysicalDeviceBufferDeviceAddressFeatures::default().buffer_device_address(true);
         let mut enable_variablepointers = vk::PhysicalDeviceVariablePointersFeatures::default()
             .variable_pointers(true)
             .variable_pointers_storage_buffer(true);
-        let mut enable_shaderint64 = vk::PhysicalDeviceShaderAtomicInt64Features::default()
-            .shader_buffer_int64_atomics(true)
-            .shader_shared_int64_atomics(true);
 
         let mut physicalfeatures2 = vk::PhysicalDeviceFeatures2::default()
             .push_next(&mut enable_dynrender)
-            .push_next(&mut enable_bda)
             .push_next(&mut enable_variablepointers)
-            .push_next(&mut enable_shaderint64)
-            .push_next(&mut descriptor_indexing_features);
+            .push_next(&mut pd12features)
+            .features(pd_features);
 
         let device_create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&gfx_queue_create_info)
@@ -276,7 +271,7 @@ impl Shader {
         let prefix = match shader_type {
             ShaderType::FRAGMENT => "fs",
             ShaderType::VERTEX => "vs",
-            ShaderType::COMPUTE => "comp",
+            ShaderType::COMPUTE => "cs",
             ShaderType::MESH => "mesh",
         };
         let shader_path_str = format!("shaders/{}{}.o", prefix, name);
@@ -394,6 +389,33 @@ impl Pipeline {
             vk_pipeline: gfxpipe,
         }
     }
+
+    pub fn load_compute_pipeline_from_name_and_layout(name: &String, context: &VkContextData, layout: &PipelineLayout) -> Self {
+        let cs = Shader::loadFromNameAndType(&name, ShaderType::COMPUTE, context);
+        let shadername = CString::new("main").unwrap();
+
+        let compute_stage = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::COMPUTE)
+        .module(cs.shader_module)
+        .name(&shadername.as_c_str());
+        
+        let pipeline_create_info = vk::ComputePipelineCreateInfo::default()
+            .stage(compute_stage)
+            .layout(*layout)
+            .base_pipeline_handle(vk::Pipeline::null());
+
+        let gfxpipe = unsafe {
+            context
+                .device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_create_info], None)
+                .expect("Failure to generate compute pipelines")
+        }[0];
+
+        Pipeline {
+            name: name.clone(),
+            vk_pipeline: gfxpipe,
+        }
+    }
 }
 
 
@@ -501,10 +523,12 @@ impl Buffer {
 
 
         let last_offset = self.allocated_slices.last().map_or(0,|slice| slice.offset + slice.size);
-        return BufferSlice {
+        let new_slice = BufferSlice {
             offset: last_offset,
             size: requested_size
-        }
+        };
+        self.allocated_slices.push(new_slice.clone());
+        new_slice
     }
 }
 

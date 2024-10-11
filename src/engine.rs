@@ -13,6 +13,7 @@ use ash::vk::{self, PipelineLayout};
 
 use cgmath::{Deg, Matrix4, Point3, Vector3};
 use object::Object;
+use shader_struct::VertexEntry;
 use std::rc::Rc;
 use std::{cmp, u32};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle};
@@ -35,9 +36,11 @@ pub struct Engine {
     bindless_texture_descriptorset_layout: vk::DescriptorSetLayout,
     bindless_texture_descriptorset: vk::DescriptorSet,
     bindless_handle: u32,
+    draw_submit_compute_shader: vkutil::Pipeline,
     global_ibo: vkutil::Buffer,
     global_vbo: vkutil::Buffer,
     staging_buf: vkutil::Buffer,
+    indirect_draw_buf: vkutil::Buffer,
 }
 
 struct FrameData<'a> {
@@ -90,6 +93,14 @@ impl Engine {
             &context,
         );
 
+        // buffer for vkCmdDrawIndexedIndirectCount
+        let indirect_draw_buf = vkutil::Buffer::new_from_size_and_flags(
+            1 * 1024 * 1024,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::INDIRECT_BUFFER,
+            vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
+            &context,
+        );
+
         let descriptor_set_layout_bindings = [vk::DescriptorSetLayoutBinding::default()
             .binding(0)
             .descriptor_count(MAX_BINDLESS_TEXTURES) // upper bound only, variable descriptor count
@@ -116,9 +127,13 @@ impl Engine {
         //default engine-wide push constant layouts
         let push_constant_ranges = [
             vk::PushConstantRange::default()
-                .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+                .stage_flags(
+                    vk::ShaderStageFlags::VERTEX
+                        | vk::ShaderStageFlags::FRAGMENT
+                        | vk::ShaderStageFlags::COMPUTE,
+                )
                 .offset(0)
-                .size(16), // 2 buffer device addresses for mesh and object data
+                .size(32), // 3 buffer device addresses for mesh and object data (3*8 = 24) + 8 for object count
         ];
 
         let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::default()
@@ -157,6 +172,14 @@ impl Engine {
             (pool, set)
         };
 
+        let compute_drawsubmit_shader_name = String::from("draw_submit");
+        let draw_submit_compute_shader =
+            vkutil::Pipeline::load_compute_pipeline_from_name_and_layout(
+                &compute_drawsubmit_shader_name,
+                &context,
+                &opaque_mesh_layout,
+            );
+
         let mut eng = Engine {
             frame_index: 0,
             context: context,
@@ -175,9 +198,11 @@ impl Engine {
             bindless_texture_descriptorset_layout: bindless_texture_descriptorset_layouts[0],
             bindless_texture_descriptorset: descriptor_set,
             bindless_handle: 0,
+            draw_submit_compute_shader,
             global_ibo,
             global_vbo,
             staging_buf,
+            indirect_draw_buf,
         };
 
         eng.render_init();
@@ -239,20 +264,34 @@ impl Engine {
     }
 
     fn scene_init(&mut self) {
-        let fox_shader_name = String::from("main");
-        let fox_shader_pipeline =
-            Rc::new(vkutil::Pipeline::load_gfx_pipeline_from_name_and_layout(
-                &fox_shader_name,
-                &self.context,
-                &self.opaque_layout,
-            ));
+        let opaque_pbr_shader_name = String::from("main");
+        let opaque_pbr_shader = Rc::new(vkutil::Pipeline::load_gfx_pipeline_from_name_and_layout(
+            &opaque_pbr_shader_name,
+            &self.context,
+            &self.opaque_layout,
+        ));
 
-        let fox_obj = object::Object::loadObjectInEngine(
+        let mut helmet_obj = object::Object::loadObjectInEngine(
             self,
             String::from("DamagedHelmet.glb"),
-            fox_shader_pipeline,
+            opaque_pbr_shader.clone(),
         );
-        //fox_obj.transform = fox_obj.transform * Matrix4::from_scale(0.02f32);
+        helmet_obj.transform = helmet_obj.transform * Matrix4::from_angle_x(Deg(90.0));
+        self.objects.push(helmet_obj);
+
+        let mut fox_obj = object::Object::loadObjectInEngine(
+            self,
+            String::from("Fox.glb"),
+            opaque_pbr_shader.clone(),
+        );
+        fox_obj.transform = fox_obj.transform
+            * Matrix4::from_translation(Vector3 {
+                x: (1.0),
+                y: (0.0),
+                z: (0.0),
+            });
+        fox_obj.transform = fox_obj.transform * Matrix4::from_scale(0.02f32);
+
         self.objects.push(fox_obj);
     }
 
@@ -432,8 +471,7 @@ impl Engine {
         self.frame_index += 1;
 
         let frame_indexer = (self.frame_index % MAX_FRAMES_IN_FLIGHT as i64) as usize;
-        let dynrend_loader =
-            ash::khr::dynamic_rendering::Device::new(&self.context.instance, &self.context.device);
+
         let swapchain_loader =
             ash::khr::swapchain::Device::new(&self.context.instance, &self.context.device);
 
@@ -532,46 +570,8 @@ impl Engine {
             );
         }
 
-        // start dynamic rendering
-        unsafe {
-            let color_attachments = [vk::RenderingAttachmentInfoKHR::default()
-                .clear_value(vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.0, 0.0, 0.0, 0.0],
-                    },
-                })
-                .image_layout(vk::ImageLayout::ATTACHMENT_OPTIMAL)
-                .image_view(image_view_acquired)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)];
-            let depth_attachment = vk::RenderingAttachmentInfoKHR::default()
-                .clear_value(vk::ClearValue {
-                    depth_stencil: vk::ClearDepthStencilValue {
-                        depth: 1.0f32,
-                        stencil: 0,
-                    },
-                })
-                .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-                .image_view(self.depth_buffer.as_ref().unwrap().vk_imageview)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::DONT_CARE);
-            dynrend_loader.cmd_begin_rendering(
-                commandbuffer,
-                &vk::RenderingInfoKHR::default()
-                    .color_attachments(&color_attachments)
-                    .depth_attachment(&depth_attachment)
-                    .render_area(vk::Rect2D::default().extent(self.swapchain_extent))
-                    .layer_count(1),
-            )
-        }
-
         // actual render work
-        self.render_scene(&commandbuffer, &frame_data);
-
-        // end dynamic rendering
-        unsafe {
-            dynrend_loader.cmd_end_rendering(commandbuffer);
-        }
+        self.render_scene(&commandbuffer, &image_view_acquired);
 
         // transitioning resources back to present
         unsafe {
@@ -638,8 +638,15 @@ impl Engine {
         }
     }
 
-    fn render_scene(&self, commandbuffer: &vk::CommandBuffer, frame_data: &FrameData) {
-        //scene rendering
+    fn render_scene(
+        &self,
+        commandbuffer: &vk::CommandBuffer,
+        swapchain_image_view: &vk::ImageView,
+    ) {
+        let dynrend_loader =
+            ash::khr::dynamic_rendering::Device::new(&self.context.instance, &self.context.device);
+
+        // set scissor and viewports
         let viewport = vk::Viewport::default()
             .max_depth(1.0f32)
             .width(self.swapchain_extent.width as f32)
@@ -660,18 +667,72 @@ impl Engine {
                 0,
                 vk::IndexType::UINT32,
             );
+        };
 
-            let push_constant_addresses = [
-                self.global_vbo.buffer_address,
-                //frame_data.scene_buffer.buffer_address,
-                self.staging_buf.buffer_address,
-            ];
-            let push_constant_addresses_u8: [u8; 16] = std::mem::transmute(push_constant_addresses);
+        // calculate per-object frame structure
+        let mut object_ssbo: Vec<shader_struct::ObjectEntry> = Vec::new();
+        let proj_matrix = cgmath::perspective(Deg(45.0f32), aspect, 0.1f32, 10.0f32);
+        let cam_transform = Matrix4::look_at_rh(
+            Point3::new(0.0f32, 1.3f32, 4.0f32),
+            Point3::new(0.0f32, 0.3f32, 0.0f32),
+            Vector3::new(0.0f32, -1.0f32, 0.0f32),
+        );
 
+        let obj_rotation = Matrix4::from_angle_y(Deg(1.0f32 * self.frame_index as f32));
+
+        for obj in &self.objects {
+            for prim in obj.primitives.iter() {
+                let obj_matrix = obj_rotation * obj.transform;
+                let obj_pos = obj_matrix.z;
+                let mvp = proj_matrix * cam_transform * obj_matrix;
+
+                let obj_entry = shader_struct::ObjectEntry {
+                    model_view_projection: mvp,
+                    position: obj_pos,
+                    sphere_size: 1.0f32,
+                    ibo_offset: prim.ibo_slice.offset as u32 / std::mem::size_of::<u32>() as u32,
+                    index_count: prim.ibo_slice.size as u32 / std::mem::size_of::<u32>() as u32,
+                    vbo_offset: prim.vbo_slice.offset as u32
+                        / std::mem::size_of::<VertexEntry>() as u32,
+                    albedo_handle: prim.base_color_tex,
+                    metallic_roughness_handle: prim.metallic_roughness_tex,
+                    occlusion_handle: prim.occlusion_tex,
+                    normal_handle: prim.normal_tex,
+                    emissive_handle: prim.emissive_tex,
+                };
+                object_ssbo.push(obj_entry);
+            }
+        }
+
+        let staging_alloc_ptr = self
+            .context
+            .vma_alloc
+            .get_allocation_info(&self.staging_buf.mem_alloc)
+            .mapped_data;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                object_ssbo.as_ptr(),
+                staging_alloc_ptr as *mut shader_struct::ObjectEntry,
+                object_ssbo.len(),
+            );
+        }
+
+        // send over push constants and descriptors
+        let push_constants = shader_struct::PushConstants {
+            object_count: object_ssbo.len().try_into().unwrap(),
+            vbo: self.global_vbo.buffer_address,
+            objects: self.staging_buf.buffer_address,
+            drawbuf: self.indirect_draw_buf.buffer_address,
+        };
+
+        unsafe {
+            let push_constant_addresses_u8: [u8; 32] = std::mem::transmute(push_constants);
             self.context.device.cmd_push_constants(
                 *commandbuffer,
                 self.opaque_layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                vk::ShaderStageFlags::VERTEX
+                    | vk::ShaderStageFlags::FRAGMENT
+                    | vk::ShaderStageFlags::COMPUTE,
                 0,
                 &push_constant_addresses_u8[..],
             );
@@ -687,62 +748,110 @@ impl Engine {
             );
         }
 
-        let mut object_ssbo: Vec<shader_struct::ObjectEntry> = Vec::new();
-        let proj_matrix = cgmath::perspective(Deg(45.0f32), aspect, 0.1f32, 10.0f32);
-        let cam_transform = Matrix4::look_at_rh(
-            Point3::new(0.0f32, 1.3f32, 4.0f32),
-            Point3::new(0.0f32, 0.3f32, 0.0f32),
-            Vector3::new(0.0f32, -1.0f32, 0.0f32),
-        );
-
-        let obj_rotation = Matrix4::from_angle_y(Deg(1.0f32 * self.frame_index as f32));
-
-        for obj in &self.objects {
-            for prim in obj.primitives.iter() {
-                let mvp = proj_matrix * cam_transform * obj_rotation * obj.transform;
-
-                let obj_entry = shader_struct::ObjectEntry {
-                    model_view_projection: mvp,
-                    albedo_handle: prim.base_color_tex,
-                    metallic_roughness_handle: prim.metallic_roughness_tex,
-                    occlusion_handle: prim.occlusion_tex,
-                    normal_handle: prim.normal_tex,
-                    emissive_handle: prim.emissive_tex,
-                };
-                object_ssbo.push(obj_entry);
-            }
-        }
-
-        let alloc_ptr = self
-            .context
-            .vma_alloc
-            .get_allocation_info(&self.staging_buf.mem_alloc)
-            .mapped_data;
+        // compute shader that fills in the indirect buffer
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                object_ssbo.as_ptr(),
-                alloc_ptr as *mut shader_struct::ObjectEntry,
-                object_ssbo.len(),
+            self.context.device.cmd_fill_buffer(
+                *commandbuffer,
+                self.indirect_draw_buf.vk_buffer,
+                0,
+                1024,
+                0,
+            );
+            self.context.device.cmd_bind_pipeline(
+                *commandbuffer,
+                vk::PipelineBindPoint::COMPUTE,
+                self.draw_submit_compute_shader.vk_pipeline,
+            );
+            let dispatch_size = u32::div_ceil(object_ssbo.len() as u32, 64);
+            self.context
+                .device
+                .cmd_dispatch(*commandbuffer, dispatch_size, 1, 1);
+
+            // draw indirect command on the above buffer
+            self.context.device.cmd_bind_pipeline(
+                *commandbuffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.objects[0].pipeline.vk_pipeline,
             );
         }
 
-        for obj in &self.objects {
-            for prim in obj.primitives.iter() {
-                unsafe {
-                    self.context.device.cmd_bind_pipeline(
-                        *commandbuffer,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        obj.pipeline.vk_pipeline,
-                    );
-
-                    let index_count = prim.ibo_slice.size as u32 / std::mem::size_of::<u32>() as u32;
-                    let first_index = prim.ibo_slice.offset as u32 / std::mem::size_of::<u32>() as u32;
-                    self.context
-                        .device
-                        .cmd_draw_indexed(*commandbuffer, index_count, 1, first_index, 0, 0);
-                }
-            }
+        // start dynamic rendering
+        unsafe {
+            let color_attachments = [vk::RenderingAttachmentInfoKHR::default()
+                .clear_value(vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [0.0, 0.0, 0.0, 0.0],
+                    },
+                })
+                .image_layout(vk::ImageLayout::ATTACHMENT_OPTIMAL)
+                .image_view(*swapchain_image_view)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)];
+            let depth_attachment = vk::RenderingAttachmentInfoKHR::default()
+                .clear_value(vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: 1.0f32,
+                        stencil: 0,
+                    },
+                })
+                .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                .image_view(self.depth_buffer.as_ref().unwrap().vk_imageview)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE);
+            dynrend_loader.cmd_begin_rendering(
+                *commandbuffer,
+                &vk::RenderingInfoKHR::default()
+                    .color_attachments(&color_attachments)
+                    .depth_attachment(&depth_attachment)
+                    .render_area(vk::Rect2D::default().extent(self.swapchain_extent))
+                    .layer_count(1),
+            )
         }
+
+        // execute indirect draw based on above buffer
+        unsafe {
+            self.context.device.cmd_draw_indexed_indirect_count(
+                *commandbuffer,
+                self.indirect_draw_buf.vk_buffer,
+                4,
+                self.indirect_draw_buf.vk_buffer,
+                0,
+                10000,
+                std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32,
+            );
+        }
+
+        // end dynamic rendering
+        unsafe {
+            dynrend_loader.cmd_end_rendering(*commandbuffer);
+        }
+
+        // let mut current_instance_id = 0;
+        // for obj in &self.objects {
+        //     for prim in obj.primitives.iter() {
+        //         unsafe {
+        //             self.context.device.cmd_bind_pipeline(
+        //                 *commandbuffer,
+        //                 vk::PipelineBindPoint::GRAPHICS,
+        //                 obj.pipeline.vk_pipeline,
+        //             );
+
+        //             let index_count =
+        //                 prim.ibo_slice.size as u32 / std::mem::size_of::<u32>() as u32;
+        //             let first_index =
+        //                 prim.ibo_slice.offset as u32 / std::mem::size_of::<u32>() as u32;
+        //             self.context.device.cmd_draw_indexed(
+        //                 *commandbuffer,
+        //                 index_count,
+        //                 1,
+        //                 first_index,
+        //                 0,
+        //                 current_instance_id,
+        //             );
+        //             current_instance_id += 1;
+        //         }
+        //     }
+        // }
     }
 }
 
@@ -758,6 +867,8 @@ impl Drop for Engine {
         self.global_ibo.destroy(&self.context);
         self.global_vbo.destroy(&self.context);
         self.staging_buf.destroy(&self.context);
+        self.indirect_draw_buf.destroy(&self.context);
+
         self.scene_buffers
             .iter_mut()
             .for_each(|b| b.destroy(&self.context));
