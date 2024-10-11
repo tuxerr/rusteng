@@ -26,10 +26,15 @@ struct VertexEntry
 struct ObjectEntry
 {
     float4x4 modelViewProj;
+    uint albedo_handle;
+    uint metallic_roughness_handle;
+    uint occlusion_handle;
+    uint normal_handle;
+    uint emissive_handle;
 }
 
 [vk::binding(0, 0)] 
-Sampler2D bindlessTextures[10];
+Sampler2D bindlessTextures[]; 
 
 [vk::push_constant]
 cbuffer Constants {
@@ -52,5 +57,11 @@ VertexStageOutput vertexMain(
 [shader("fragment")]
 float4 fragmentMain(CoarseVertex coarseVertex: CoarseVertex) : SV_Target
 {
-    return bindlessTextures[0].Sample(coarseVertex.uv);
+    if (objects[0].albedo_handle > 10000) {
+        return float4(1.0, 0.0, 1.0, 1.0);
+    }
+    float4 color = bindlessTextures[objects[0].albedo_handle].Sample(coarseVertex.uv);
+    float4 emissive = bindlessTextures[objects[0].emissive_handle].Sample(coarseVertex.uv);
+    float4 occlusion = bindlessTextures[objects[0].occlusion_handle].Sample(coarseVertex.uv);
+    return (color + 2 * emissive) * occlusion;
 }

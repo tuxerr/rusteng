@@ -9,12 +9,12 @@ const REQUIRED_DEVICE_EXTENSIONS: [*const i8; 2] = [
 const MAX_FRAMES_IN_FLIGHT: u32 = 3;
 const MAX_BINDLESS_TEXTURES: u32 = 100000;
 
-use ash::vk::{self, DescriptorSetLayout, PipelineLayout};
+use ash::vk::{self, PipelineLayout};
 
-use cgmath::{Deg, Matrix4, Point3, Rad, Vector3};
+use cgmath::{Deg, Matrix4, Point3, Vector3};
 use object::Object;
-use std::cmp;
 use std::rc::Rc;
+use std::{cmp, u32};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle};
 
 pub struct Engine {
@@ -83,7 +83,7 @@ impl Engine {
         );
 
         let staging_buf = vkutil::Buffer::new_from_size_and_flags(
-            8 * 1024 * 1024,
+            64 * 1024 * 1024,
             vk::BufferUsageFlags::STORAGE_BUFFER,
             vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
                 | vk_mem::AllocationCreateFlags::MAPPED,
@@ -125,31 +125,38 @@ impl Engine {
             .push_constant_ranges(&push_constant_ranges)
             .set_layouts(&bindless_texture_descriptorset_layouts);
 
-        let descriptor_pool_sizes = [vk::DescriptorPoolSize::default().descriptor_count(MAX_BINDLESS_TEXTURES).ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)];
+        let descriptor_pool_sizes = [vk::DescriptorPoolSize::default()
+            .descriptor_count(MAX_BINDLESS_TEXTURES)
+            .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)];
         let descriptor_pool_create_info = vk::DescriptorPoolCreateInfo::default()
             .flags(vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND)
             .max_sets(1)
             .pool_sizes(&descriptor_pool_sizes);
 
-        
         let opaque_mesh_layout = unsafe {
-                context
-                    .device
-                    .create_pipeline_layout(&pipeline_layout_create_info, None)
-                    .expect("Failure to create pipeline layout")
-            };
+            context
+                .device
+                .create_pipeline_layout(&pipeline_layout_create_info, None)
+                .expect("Failure to create pipeline layout")
+        };
 
-        let (descriptor_pool,descriptor_set) = unsafe { 
-            let pool = context.device.create_descriptor_pool(&descriptor_pool_create_info, None).expect("Failure to create descriptor pool!");
-            
+        let (descriptor_pool, descriptor_set) = unsafe {
+            let pool = context
+                .device
+                .create_descriptor_pool(&descriptor_pool_create_info, None)
+                .expect("Failure to create descriptor pool!");
+
             let descriptor_set_allocinfo = vk::DescriptorSetAllocateInfo::default()
                 .descriptor_pool(pool)
                 .set_layouts(&bindless_texture_descriptorset_layouts);
 
-            let set = context.device.allocate_descriptor_sets(&descriptor_set_allocinfo).expect("Failure to allocate bindless descriptor set")[0];
-            (pool,set)
+            let set = context
+                .device
+                .allocate_descriptor_sets(&descriptor_set_allocinfo)
+                .expect("Failure to allocate bindless descriptor set")[0];
+            (pool, set)
         };
-        
+
         let mut eng = Engine {
             frame_index: 0,
             context: context,
@@ -233,16 +240,19 @@ impl Engine {
 
     fn scene_init(&mut self) {
         let fox_shader_name = String::from("main");
-        let fox_shader_pipeline = Rc::new(vkutil::Pipeline::load_gfx_pipeline_from_name_and_layout(
-            &fox_shader_name,
-            &self.context,
-            &self.opaque_layout
-        ));
+        let fox_shader_pipeline =
+            Rc::new(vkutil::Pipeline::load_gfx_pipeline_from_name_and_layout(
+                &fox_shader_name,
+                &self.context,
+                &self.opaque_layout,
+            ));
 
-        let mut fox_obj =
-            object::Object::loadObjectInEngine(self, String::from("Fox"), fox_shader_pipeline);
-        fox_obj.transform = fox_obj.transform * Matrix4::from_scale(0.02f32);
-        fox_obj.transform = fox_obj.transform * Matrix4::from_angle_y(Deg(-90f32));
+        let fox_obj = object::Object::loadObjectInEngine(
+            self,
+            String::from("DamagedHelmet.glb"),
+            fox_shader_pipeline,
+        );
+        //fox_obj.transform = fox_obj.transform * Matrix4::from_scale(0.02f32);
         self.objects.push(fox_obj);
     }
 
@@ -379,6 +389,43 @@ impl Engine {
             vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
             &self.context,
         ));
+    }
+
+    pub fn execute_synchronous_on_queue<F>(&self, queue: ash::vk::Queue, mut closure: F)
+    where
+        F: FnMut(ash::vk::CommandBuffer) -> (),
+    {
+        let commandbuffer = self
+            .context
+            .allocate_and_begin_commandbuffer(&self.commandpools[0]);
+
+        closure(commandbuffer);
+
+        unsafe {
+            self.context
+                .device
+                .end_command_buffer(commandbuffer)
+                .expect("Failure to end commandbuffer recording");
+
+            self.context.device.reset_fences(&[self.fences[0]]).unwrap();
+
+            let commandbuffers_submit = [commandbuffer];
+            let queue_submit_info =
+                vk::SubmitInfo::default().command_buffers(&commandbuffers_submit);
+            self.context
+                .device
+                .queue_submit(
+                    self.context.queues.gfx_queue,
+                    &[queue_submit_info],
+                    self.fences[0],
+                )
+                .expect("Failure to submit commandbuffer into gfx queue");
+
+            self.context
+                .device
+                .wait_for_fences(&[self.fences[0]], true, u64::MAX)
+                .expect("Failure to wait for staging fence");
+        }
     }
 
     pub fn render(&mut self) {
@@ -631,27 +678,39 @@ impl Engine {
 
             // bind bindless descriptorset
             self.context.device.cmd_bind_descriptor_sets(
-                *commandbuffer, 
-                vk::PipelineBindPoint::GRAPHICS, 
-                self.opaque_layout, 
-                0, 
-                &[self.bindless_texture_descriptorset], &[]);
+                *commandbuffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.opaque_layout,
+                0,
+                &[self.bindless_texture_descriptorset],
+                &[],
+            );
         }
 
         let mut object_ssbo: Vec<shader_struct::ObjectEntry> = Vec::new();
         let proj_matrix = cgmath::perspective(Deg(45.0f32), aspect, 0.1f32, 10.0f32);
         let cam_transform = Matrix4::look_at_rh(
-            Point3::new(0.0f32, -2.0f32, 2.0f32),
-            Point3::new(0.0f32, 0.0f32, 0.0f32),
-            Vector3::new(0.0f32, 0.0f32, 1.0f32),
+            Point3::new(0.0f32, 1.3f32, 4.0f32),
+            Point3::new(0.0f32, 0.3f32, 0.0f32),
+            Vector3::new(0.0f32, -1.0f32, 0.0f32),
         );
 
+        let obj_rotation = Matrix4::from_angle_y(Deg(1.0f32 * self.frame_index as f32));
+
         for obj in &self.objects {
-            let mvp = proj_matrix * cam_transform * obj.transform;
-            let obj_entry = shader_struct::ObjectEntry {
-                model_view_projection: mvp,
-            };
-            object_ssbo.push(obj_entry);
+            for prim in obj.primitives.iter() {
+                let mvp = proj_matrix * cam_transform * obj_rotation * obj.transform;
+
+                let obj_entry = shader_struct::ObjectEntry {
+                    model_view_projection: mvp,
+                    albedo_handle: prim.base_color_tex,
+                    metallic_roughness_handle: prim.metallic_roughness_tex,
+                    occlusion_handle: prim.occlusion_tex,
+                    normal_handle: prim.normal_tex,
+                    emissive_handle: prim.emissive_tex,
+                };
+                object_ssbo.push(obj_entry);
+            }
         }
 
         let alloc_ptr = self
@@ -668,17 +727,20 @@ impl Engine {
         }
 
         for obj in &self.objects {
-            unsafe {
-                self.context.device.cmd_bind_pipeline(
-                    *commandbuffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    obj.pipeline.vk_pipeline,
-                );
+            for prim in obj.primitives.iter() {
+                unsafe {
+                    self.context.device.cmd_bind_pipeline(
+                        *commandbuffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        obj.pipeline.vk_pipeline,
+                    );
 
-                let index_count = obj.ibo_slice.size / std::mem::size_of::<u32>() as u32;
-                self.context
-                    .device
-                    .cmd_draw_indexed(*commandbuffer, index_count, 1, 0, 0, 0);
+                    let index_count = prim.ibo_slice.size as u32 / std::mem::size_of::<u32>() as u32;
+                    let first_index = prim.ibo_slice.offset as u32 / std::mem::size_of::<u32>() as u32;
+                    self.context
+                        .device
+                        .cmd_draw_indexed(*commandbuffer, index_count, 1, first_index, 0, 0);
+                }
             }
         }
     }
@@ -696,7 +758,9 @@ impl Drop for Engine {
         self.global_ibo.destroy(&self.context);
         self.global_vbo.destroy(&self.context);
         self.staging_buf.destroy(&self.context);
-        self.scene_buffers.iter_mut().for_each(|b| b.destroy(&self.context));
+        self.scene_buffers
+            .iter_mut()
+            .for_each(|b| b.destroy(&self.context));
 
         if let Some(depth_buffer) = &mut self.depth_buffer {
             depth_buffer.destroy(&self.context);

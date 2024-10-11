@@ -7,6 +7,11 @@ pub struct VertexEntry {
 
 #[repr(C)]
 pub struct ObjectEntry {
-    pub model_view_projection: cgmath::Matrix4<f32>
+    pub model_view_projection: cgmath::Matrix4<f32>,
+    pub albedo_handle: u32,
+    pub metallic_roughness_handle: u32,
+    pub occlusion_handle: u32,
+    pub normal_handle: u32,
+    pub emissive_handle: u32
 }
 

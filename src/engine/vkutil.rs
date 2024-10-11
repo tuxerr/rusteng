@@ -1,14 +1,15 @@
 use ash::vk::{
     self, ImageAspectFlags, ImageLayout, ImageTiling, ImageType, PipelineLayout, QueueFlags, SampleCountFlags
 };
-use winit::event::ElementState;
 
+use std::cmp::Ordering;
 use std::fs::File;
 use std::path::Path;
 
+use std::u32;
 use std::{ffi::CStr, ffi::CString, u64};
 
-use vk_mem::{self, Alloc}; // vma allocator for buffers/textures
+use vk_mem::{self, Alloc};
 
 const VKAPP_NAME: &str = "FoxyGfx";
 const VKVALID_NAME: &CStr = c"VK_LAYER_KHRONOS_validation";
@@ -44,7 +45,7 @@ impl VkContextData {
             p_application_name: VKAPP_NAME.as_ptr().cast(),
             ..Default::default()
         };
-        let mut instance_create_info = vk::InstanceCreateInfo {
+        let instance_create_info = vk::InstanceCreateInfo {
             p_application_info: &app_info,
             ..Default::default()
         }
@@ -74,13 +75,13 @@ impl VkContextData {
             );
         }
 
-        let enabled_layer_names = [VKVALID_NAME.as_ptr()];
-        if available_layers
-            .into_iter()
-            .any(|layer| layer.layer_name_as_c_str().unwrap().eq(VKVALID_NAME))
-        {
-            instance_create_info = instance_create_info.enabled_layer_names(&enabled_layer_names);
-        }
+        // let enabled_layer_names = [VKVALID_NAME.as_ptr()];
+        // if available_layers
+        //     .into_iter()
+        //     .any(|layer| layer.layer_name_as_c_str().unwrap().eq(VKVALID_NAME))
+        // {
+        //     instance_create_info = instance_create_info.enabled_layer_names(&enabled_layer_names);
+        // }
 
         // instance create
         let instance = unsafe {
@@ -395,11 +396,27 @@ impl Pipeline {
     }
 }
 
+
+#[derive(Default)]
+#[derive(PartialEq, Eq, PartialOrd)]
+#[derive(Clone)]
+pub struct BufferSlice {
+    pub size: usize,
+    pub offset: usize,
+}
+
+impl Ord for BufferSlice {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.offset.cmp(&other.offset)
+    }
+}
+
 pub struct Buffer {
     pub size: usize,
     pub mem_alloc: vk_mem::Allocation,
     pub vk_buffer: vk::Buffer,
     pub buffer_address: u64, //buffer_device_address allocation
+    allocated_slices: Vec<BufferSlice>
 }
 
 impl Buffer {
@@ -453,6 +470,7 @@ impl Buffer {
             mem_alloc: alloc,
             vk_buffer: buf,
             buffer_address: buf_addr,
+            allocated_slices: Vec::new()
         }
     }
 
@@ -461,6 +479,31 @@ impl Buffer {
             context
                 .vma_alloc
                 .destroy_buffer(self.vk_buffer, &mut self.mem_alloc);
+        }
+    }
+
+    pub fn allocate_slice_of_size(&mut self, requested_size: usize) -> BufferSlice {
+        // if there are at least 2 slices, try to fit in the holes
+        if self.allocated_slices.len() > 1 {
+            for idx in 0..self.allocated_slices.len()-1 {
+                let cur_end = self.allocated_slices[idx].offset + self.allocated_slices[idx].size;
+                let next_start = self.allocated_slices[idx+1].offset;
+                if cur_end + requested_size < next_start {
+                    let new_slice = BufferSlice {
+                        offset: cur_end,
+                        size: requested_size,
+                    };
+                    self.allocated_slices.insert(idx+1, new_slice.clone());
+                    return new_slice;
+                }
+            }
+        }
+
+
+        let last_offset = self.allocated_slices.last().map_or(0,|slice| slice.offset + slice.size);
+        return BufferSlice {
+            offset: last_offset,
+            size: requested_size
         }
     }
 }
@@ -538,9 +581,9 @@ impl Texture {
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
             .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
             .mip_lod_bias(0.0f32)
             .anisotropy_enable(false)
             .max_anisotropy(1.0f32)
