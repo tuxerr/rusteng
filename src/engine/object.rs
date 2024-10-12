@@ -69,7 +69,7 @@ impl Object {
         let mut alloc_ptr = alloc_info.mapped_data as *mut u8;
 
         // textures need to be updated to add their bindless tex handles
-        let textures: Vec<Texture> = images
+        let images: Vec<Texture> = images
             .iter()
             .map(|image| {
                 // create image
@@ -187,6 +187,8 @@ impl Object {
             })
             .collect();
 
+        //let texture_handles : Vec<u32> = document.textures().map(|texture| images[texture.source().index()].bindless_handle.unwrap()).collect();
+
         // read VBO, IBOs and materials
         let mut vboentry = Vec::new();
         let mut iboentry: Vec<u32> = Vec::new();
@@ -205,19 +207,19 @@ impl Object {
                 let mat = primitive.material();
 
                 let color_tex = mat.pbr_metallic_roughness().base_color_texture().map_or(u32::MAX, |tex| {
-                    textures[tex.texture().index()].bindless_handle.unwrap()
+                    images[tex.texture().source().index()].bindless_handle.unwrap()
                 });
                 let metal_rough_tex = mat.pbr_metallic_roughness().metallic_roughness_texture().map_or(u32::MAX, |tex| {
-                    textures[tex.texture().index()].bindless_handle.unwrap()
+                    images[tex.texture().source().index()].bindless_handle.unwrap()
                 });
                 let emissive_tex = mat.emissive_texture().map_or(u32::MAX, |tex| {
-                    textures[tex.texture().index()].bindless_handle.unwrap()
+                    images[tex.texture().source().index()].bindless_handle.unwrap()
                 });
                 let normal_tex = mat.normal_texture().map_or(u32::MAX, |tex| {
-                    textures[tex.texture().index()].bindless_handle.unwrap()
+                    images[tex.texture().source().index()].bindless_handle.unwrap()
                 });
                 let occlusion_tex = mat.occlusion_texture().map_or(u32::MAX, |tex| {
-                    textures[tex.texture().index()].bindless_handle.unwrap()
+                    images[tex.texture().source().index()].bindless_handle.unwrap()
                 });
                 
                 // indices
@@ -229,32 +231,25 @@ impl Object {
                     }
                 }
 
+                let uvs = reader.read_tex_coords(0).map_or(vec![], |c| c.into_f32().collect());
+                let normals = reader.read_normals().map_or(vec![], |c| c.collect());
+
                 // positions
                 let vboentry_size = vboentry.len();
                 if let Some(iter_pos) = reader.read_positions() {
-                    for vertex_position in iter_pos {
+                    for (idx,vertex_position) in iter_pos.enumerate() {
                         if indices_pushed == false {
                             iboentry.push(vboentry.len() as u32);
                         }
+
+                        let uv = uvs.get(idx).map_or(cgmath::Vector2::new(0.0f32, 0.0f32), |uv| cgmath::Vector2::from(*uv));
+                        let norm = normals.get(idx).map_or(cgmath::Vector3::new(0.0f32, 0.0f32, 0.0f32), |norm| cgmath::Vector3::from(*norm));
+
                         vboentry.push(VertexEntry {
                             pos: cgmath::Vector3::from(vertex_position),
-                            norm: cgmath::Vector3::new(0.0f32, 0.0f32, 0.0f32),
-                            uv: cgmath::Vector2::new(0.0f32, 0.0f32),
+                            norm: norm,
+                            uv: uv,
                         });
-                    }
-                }
-
-                // normals
-                if let Some(iter) = reader.read_normals() {
-                    for (idx, norm) in iter.take(vboentry.len()).enumerate() {
-                        vboentry[idx].norm = cgmath::Vector3::from(norm);
-                    }
-                }
-
-                // uvs
-                if let Some(iter) = reader.read_tex_coords(0) {
-                    for (idx, uv) in iter.into_f32().take(vboentry.len()).enumerate() {
-                        vboentry[idx].uv = cgmath::Vector2::from(uv);
                     }
                 }
 
@@ -347,7 +342,7 @@ impl Object {
             gltf_document: document,
             primitives: total_primitives,
             pipeline: pipeline,
-            textures: textures,
+            textures: images,
         }
     }
 }
