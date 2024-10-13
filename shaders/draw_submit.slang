@@ -22,9 +22,9 @@ void computeMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // if we decide to draw the object (frustum culling, occlusion culling)
     uint new_object_index;
     InterlockedAdd(drawbuf->drawCount, 1, new_object_index);
-    drawbuf->draws[objid].firstIndex = obj.ibo_offset;
-    drawbuf->draws[objid].firstInstance = objid;
-    drawbuf->draws[objid].indexCount = obj.index_count;
-    drawbuf->draws[objid].instanceCount = 1;
-    drawbuf->draws[objid].vertexOffset = 0; // bindless manual vertex fetching
+    drawbuf->draws[new_object_index].firstIndex = obj.ibo_offset;
+    drawbuf->draws[new_object_index].firstInstance = objid;
+    drawbuf->draws[new_object_index].indexCount = obj.index_count;
+    drawbuf->draws[new_object_index].instanceCount = 1;
+    drawbuf->draws[new_object_index].vertexOffset = 0; // bindless manual vertex fetching
 }
