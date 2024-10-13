@@ -13,7 +13,7 @@ use ash::vk::{self, PipelineLayout};
 
 use cgmath::{Deg, Matrix4, Point3, Vector3};
 use object::Object;
-use shader_struct::VertexEntry;
+use shader_struct::{ObjectEntry, VertexEntry};
 use std::rc::Rc;
 use std::{cmp, u32};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle};
@@ -215,7 +215,7 @@ impl Engine {
         let structure_depth = MAX_FRAMES_IN_FLIGHT + 1;
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             let global_scene = vkutil::Buffer::new_from_size_and_flags(
-                1 * 1024 * 1024 as usize,
+                4 * 1024 * 1024 as usize,
                 vk::BufferUsageFlags::STORAGE_BUFFER,
                 vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
                 &self.context,
@@ -271,17 +271,17 @@ impl Engine {
             &self.opaque_layout,
         ));
 
-        let mut helmet_obj = object::Object::loadObjectInEngine(
+        /* let mut helmet_obj = object::Object::loadObjectInEngine(
             self,
             String::from("DamagedHelmet.glb"),
             opaque_pbr_shader.clone(),
         );
         helmet_obj.transform = helmet_obj.transform * Matrix4::from_angle_x(Deg(90.0));
-        self.objects.push(helmet_obj);
+        self.objects.push(helmet_obj); */
 
         let mut fox_obj = object::Object::loadObjectInEngine(
             self,
-            String::from("Fox.glb"),
+            String::from("Sponza/Sponza.gltf"),
             opaque_pbr_shader.clone(),
         );
         fox_obj.transform = fox_obj.transform
@@ -481,7 +481,8 @@ impl Engine {
         unsafe {
             self.context
                 .device
-                .wait_for_fences(&[frame_data.fence], true, u64::MAX)
+                //.wait_for_fences(&[frame_data.fence], true, u64::MAX)
+                .wait_for_fences(self.fences.as_slice(), true, u64::MAX)
                 .expect("Failure to wait on start-of-frame fence");
             self.context
                 .device
@@ -526,7 +527,7 @@ impl Engine {
             let image_barrier = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .src_access_mask(vk::AccessFlags::empty())
+                 .src_access_mask(vk::AccessFlags::empty())
                 .dst_access_mask(
                     vk::AccessFlags::COLOR_ATTACHMENT_READ
                         | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
@@ -571,7 +572,7 @@ impl Engine {
         }
 
         // actual render work
-        self.render_scene(&commandbuffer, &image_view_acquired);
+        self.render_scene(&commandbuffer, &image_view_acquired, &frame_data);
 
         // transitioning resources back to present
         unsafe {
@@ -642,6 +643,7 @@ impl Engine {
         &self,
         commandbuffer: &vk::CommandBuffer,
         swapchain_image_view: &vk::ImageView,
+        frame_data: &FrameData,
     ) {
         let dynrend_loader =
             ash::khr::dynamic_rendering::Device::new(&self.context.instance, &self.context.device);
@@ -671,25 +673,25 @@ impl Engine {
 
         // calculate per-object frame structure
         let mut object_ssbo: Vec<shader_struct::ObjectEntry> = Vec::new();
-        let proj_matrix = cgmath::perspective(Deg(45.0f32), aspect, 0.1f32, 10.0f32);
+        let proj_matrix = cgmath::perspective(Deg(45.0f32), aspect, 0.1f32, 200.0f32);
         let cam_transform = Matrix4::look_at_rh(
-            Point3::new(0.0f32, 1.3f32, 4.0f32),
-            Point3::new(0.0f32, 0.3f32, 0.0f32),
+            Point3::new(-27.0f32, 2.3f32, -1.5f32),
+            Point3::new(15.0f32, 8.0f32, 0.0f32),
             Vector3::new(0.0f32, -1.0f32, 0.0f32),
         );
 
-        let obj_rotation = Matrix4::from_angle_y(Deg(1.0f32 * self.frame_index as f32));
+        // let obj_rotation = Matrix4::from_angle_y(Deg(1.0f32 * self.frame_index as f32));
 
         for obj in &self.objects {
             for prim in obj.primitives.iter() {
-                let obj_matrix = obj_rotation * obj.transform;
+                let obj_matrix = /*obj_rotation * */obj.transform;
                 let obj_pos = obj_matrix.z;
                 let mvp = proj_matrix * cam_transform * obj_matrix;
 
                 let obj_entry = shader_struct::ObjectEntry {
                     model_view_projection: mvp,
                     position: obj_pos,
-                    sphere_size: 1.0f32,
+                    //sphere_size: 1.0f32,
                     ibo_offset: prim.ibo_slice.offset as u32 / std::mem::size_of::<u32>() as u32,
                     index_count: prim.ibo_slice.size as u32 / std::mem::size_of::<u32>() as u32,
                     vbo_offset: prim.vbo_slice.offset as u32
@@ -715,13 +717,33 @@ impl Engine {
                 staging_alloc_ptr as *mut shader_struct::ObjectEntry,
                 object_ssbo.len(),
             );
+            let object_ssbo_size =
+                object_ssbo.len() * std::mem::size_of::<shader_struct::ObjectEntry>();
+            let staging_region = [ash::vk::BufferCopy::default()
+                .src_offset(0)
+                .dst_offset(0)
+                .size(object_ssbo_size as u64)];
+            self.context.device.cmd_copy_buffer(
+                *commandbuffer,
+                self.staging_buf.vk_buffer,
+                frame_data.scene_buffer.vk_buffer,
+                &staging_region,
+            );
+            frame_data.scene_buffer.enqueue_barrier(
+                &self.context,
+                commandbuffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::VERTEX_SHADER,
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+            );
         }
 
         // send over push constants and descriptors
         let push_constants = shader_struct::PushConstants {
             object_count: object_ssbo.len().try_into().unwrap(),
             vbo: self.global_vbo.buffer_address,
-            objects: self.staging_buf.buffer_address,
+            objects: frame_data.scene_buffer.buffer_address,
             drawbuf: self.indirect_draw_buf.buffer_address,
         };
 
@@ -757,15 +779,33 @@ impl Engine {
                 1024,
                 0,
             );
+            self.indirect_draw_buf.enqueue_barrier(
+                &self.context,
+                commandbuffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+            );
             self.context.device.cmd_bind_pipeline(
                 *commandbuffer,
                 vk::PipelineBindPoint::COMPUTE,
                 self.draw_submit_compute_shader.vk_pipeline,
             );
             let dispatch_size = u32::div_ceil(object_ssbo.len() as u32, 64);
+            //let dispatch_size = 1;
             self.context
                 .device
                 .cmd_dispatch(*commandbuffer, dispatch_size, 1, 1);
+
+            self.indirect_draw_buf.enqueue_barrier(
+                &self.context,
+                commandbuffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::DRAW_INDIRECT,
+                vk::AccessFlags::SHADER_WRITE,
+                vk::AccessFlags::INDIRECT_COMMAND_READ,
+            );
 
             // draw indirect command on the above buffer
             self.context.device.cmd_bind_pipeline(

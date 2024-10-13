@@ -9,7 +9,7 @@ pub struct VertexEntry {
 pub struct ObjectEntry {
     pub model_view_projection: cgmath::Matrix4<f32>,
     pub position: cgmath::Vector4<f32>,
-    pub sphere_size: f32,
+    //pub sphere_size: f32,
     pub ibo_offset: u32,
     pub index_count: u32,
     pub vbo_offset: u32,

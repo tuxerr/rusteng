@@ -20,7 +20,7 @@ public struct ObjectEntry
 {
     public float4x4 modelViewProj;
     public float4 position;
-    public float sphere_size; // bounding sphere
+    //public float sphere_size; // bounding sphere
     public uint ibo_offset;
     public uint index_count;
     public uint vbo_offset;

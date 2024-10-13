@@ -1,5 +1,6 @@
 use ash::vk::{
-    self, ImageAspectFlags, ImageLayout, ImageTiling, ImageType, PipelineLayout, QueueFlags, SampleCountFlags
+    self, ImageAspectFlags, ImageLayout, ImageTiling, ImageType, PipelineLayout, QueueFlags,
+    SampleCountFlags,
 };
 
 use std::cmp::Ordering;
@@ -142,15 +143,16 @@ impl VkContextData {
             // );
             (
                 physical_devices[0],
-                (gfx.unwrap(), transfer.unwrap(), present.unwrap())
+                (gfx.unwrap(), transfer.unwrap(), present.unwrap()),
             )
         };
 
         let mut pd12features = vk::PhysicalDeviceVulkan12Features::default();
-        let mut pdfeatures2 = vk::PhysicalDeviceFeatures2::default()
-            .push_next(&mut pd12features);
+        let mut pdfeatures2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut pd12features);
 
-        unsafe { instance.get_physical_device_features2(physical_device, &mut pdfeatures2); };
+        unsafe {
+            instance.get_physical_device_features2(physical_device, &mut pdfeatures2);
+        };
         let pd_features = unsafe { instance.get_physical_device_features(physical_device) };
 
         // device create
@@ -302,7 +304,11 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    pub fn load_gfx_pipeline_from_name_and_layout(name: &String, context: &VkContextData, layout: &PipelineLayout) -> Self {
+    pub fn load_gfx_pipeline_from_name_and_layout(
+        name: &String,
+        context: &VkContextData,
+        layout: &PipelineLayout,
+    ) -> Self {
         let vs = Shader::loadFromNameAndType(&name, ShaderType::VERTEX, context);
         let fs = Shader::loadFromNameAndType(&name, ShaderType::FRAGMENT, context);
 
@@ -351,8 +357,9 @@ impl Pipeline {
             .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
 
         // opaque draw
-        let color_blend_attachments =
-            [vk::PipelineColorBlendAttachmentState::default().blend_enable(false).color_write_mask(vk::ColorComponentFlags::RGBA)];
+        let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
+            .blend_enable(false)
+            .color_write_mask(vk::ColorComponentFlags::RGBA)];
         let color_blend_state =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
 
@@ -390,15 +397,19 @@ impl Pipeline {
         }
     }
 
-    pub fn load_compute_pipeline_from_name_and_layout(name: &String, context: &VkContextData, layout: &PipelineLayout) -> Self {
+    pub fn load_compute_pipeline_from_name_and_layout(
+        name: &String,
+        context: &VkContextData,
+        layout: &PipelineLayout,
+    ) -> Self {
         let cs = Shader::loadFromNameAndType(&name, ShaderType::COMPUTE, context);
         let shadername = CString::new("main").unwrap();
 
         let compute_stage = vk::PipelineShaderStageCreateInfo::default()
-        .stage(vk::ShaderStageFlags::COMPUTE)
-        .module(cs.shader_module)
-        .name(&shadername.as_c_str());
-        
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(cs.shader_module)
+            .name(&shadername.as_c_str());
+
         let pipeline_create_info = vk::ComputePipelineCreateInfo::default()
             .stage(compute_stage)
             .layout(*layout)
@@ -418,10 +429,7 @@ impl Pipeline {
     }
 }
 
-
-#[derive(Default)]
-#[derive(PartialEq, Eq, PartialOrd)]
-#[derive(Clone)]
+#[derive(Default, PartialEq, Eq, PartialOrd, Clone)]
 pub struct BufferSlice {
     pub size: usize,
     pub offset: usize,
@@ -438,7 +446,7 @@ pub struct Buffer {
     pub mem_alloc: vk_mem::Allocation,
     pub vk_buffer: vk::Buffer,
     pub buffer_address: u64, //buffer_device_address allocation
-    allocated_slices: Vec<BufferSlice>
+    allocated_slices: Vec<BufferSlice>,
 }
 
 impl Buffer {
@@ -492,7 +500,7 @@ impl Buffer {
             mem_alloc: alloc,
             vk_buffer: buf,
             buffer_address: buf_addr,
-            allocated_slices: Vec::new()
+            allocated_slices: Vec::new(),
         }
     }
 
@@ -507,28 +515,61 @@ impl Buffer {
     pub fn allocate_slice_of_size(&mut self, requested_size: usize) -> BufferSlice {
         // if there are at least 2 slices, try to fit in the holes
         if self.allocated_slices.len() > 1 {
-            for idx in 0..self.allocated_slices.len()-1 {
+            for idx in 0..self.allocated_slices.len() - 1 {
                 let cur_end = self.allocated_slices[idx].offset + self.allocated_slices[idx].size;
-                let next_start = self.allocated_slices[idx+1].offset;
+                let next_start = self.allocated_slices[idx + 1].offset;
                 if cur_end + requested_size < next_start {
                     let new_slice = BufferSlice {
                         offset: cur_end,
                         size: requested_size,
                     };
-                    self.allocated_slices.insert(idx+1, new_slice.clone());
+                    self.allocated_slices.insert(idx + 1, new_slice.clone());
                     return new_slice;
                 }
             }
         }
 
-
-        let last_offset = self.allocated_slices.last().map_or(0,|slice| slice.offset + slice.size);
+        let last_offset = self
+            .allocated_slices
+            .last()
+            .map_or(0, |slice| slice.offset + slice.size);
         let new_slice = BufferSlice {
             offset: last_offset,
-            size: requested_size
+            size: requested_size,
         };
         self.allocated_slices.push(new_slice.clone());
         new_slice
+    }
+
+    pub fn enqueue_barrier(
+        &self,
+        context: &VkContextData,
+        commandbuffer: &vk::CommandBuffer,
+        src_stage: vk::PipelineStageFlags,
+        dst_stage: vk::PipelineStageFlags,
+        src_access: vk::AccessFlags,
+        dst_access: vk::AccessFlags,
+    ) {
+        let buffer_barrier = [vk::BufferMemoryBarrier::default()
+            .src_access_mask(src_access)
+            .dst_access_mask(dst_access)
+            .src_queue_family_index(0)
+            .dst_queue_family_index(0)
+            .buffer(self.vk_buffer)
+            .offset(0)
+            .size(vk::WHOLE_SIZE)];
+
+        unsafe {
+            context.device.cmd_pipeline_barrier(
+                *commandbuffer,
+                src_stage,
+                dst_stage,
+                vk::DependencyFlags::empty(),
+                &[],
+                &buffer_barrier,
+                &[],
+            );
+        }
     }
 }
 
@@ -538,7 +579,7 @@ pub struct Texture {
     pub vk_image: vk::Image,
     pub vk_imageview: vk::ImageView,
     pub vk_sampler: vk::Sampler,
-    pub bindless_handle: Option<u32>
+    pub bindless_handle: Option<u32>,
 }
 
 impl Texture {
@@ -550,10 +591,7 @@ impl Texture {
         context: &VkContextData,
     ) -> Self {
         let (initial_layout, aspect) = if format == vk::Format::D32_SFLOAT {
-            (
-                ImageLayout::UNDEFINED,
-                ImageAspectFlags::DEPTH,
-            )
+            (ImageLayout::UNDEFINED, ImageAspectFlags::DEPTH)
         } else {
             (ImageLayout::UNDEFINED, ImageAspectFlags::COLOR)
         };
@@ -561,7 +599,11 @@ impl Texture {
         let image_create_info = vk::ImageCreateInfo::default()
             .image_type(ImageType::TYPE_2D)
             .format(format)
-            .extent(vk::Extent3D { width: extent.width, height: extent.height, depth: 1 })
+            .extent(vk::Extent3D {
+                width: extent.width,
+                height: extent.height,
+                depth: 1,
+            })
             .mip_levels(1)
             .array_layers(1)
             .samples(SampleCountFlags::TYPE_1)
@@ -617,7 +659,10 @@ impl Texture {
             .unnormalized_coordinates(false);
 
         let sampler = unsafe {
-            context.device.create_sampler(&sampler_create_info, None).expect("Failure to create sampler")
+            context
+                .device
+                .create_sampler(&sampler_create_info, None)
+                .expect("Failure to create sampler")
         };
 
         Texture {
@@ -626,7 +671,7 @@ impl Texture {
             vk_image: image,
             vk_imageview: img_view,
             vk_sampler: sampler,
-            bindless_handle: None
+            bindless_handle: None,
         }
     }
 
