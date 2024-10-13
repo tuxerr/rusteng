@@ -4,17 +4,18 @@ use super::{shader_struct::VertexEntry, vkutil, Engine};
 use ash::vk;
 use cgmath::SquareMatrix;
 use gltf;
+use std::collections::HashSet;
 use std::path::Path;
 use std::rc::Rc;
 use std::{u32, u64};
 use derivative::Derivative;
 
-fn gltf_format_to_vulkan_format(format: gltf::image::Format) -> vk::Format {
+fn gltf_format_to_vulkan_format(format: gltf::image::Format, srgb : bool) -> vk::Format {
     match format {
-        gltf::image::Format::R8 => vk::Format::R8_UNORM,
-        gltf::image::Format::R8G8 => vk::Format::R8G8_UNORM,
-        gltf::image::Format::R8G8B8 => vk::Format::R8G8B8A8_UNORM, // need 32-bit translate
-        gltf::image::Format::R8G8B8A8 => vk::Format::R8G8B8A8_UNORM,
+        gltf::image::Format::R8 => if srgb { vk::Format::R8_SRGB } else { vk::Format::R8_UNORM},
+        gltf::image::Format::R8G8 => if srgb { vk::Format::R8G8_SRGB } else { vk::Format::R8G8_UNORM},
+        gltf::image::Format::R8G8B8 => if srgb { vk::Format::R8G8B8A8_SRGB } else { vk::Format::R8G8B8A8_UNORM},
+        gltf::image::Format::R8G8B8A8 => if srgb { vk::Format::R8G8B8A8_SRGB } else { vk::Format::R8G8B8A8_UNORM},
         gltf::image::Format::R16 => vk::Format::R16_UNORM,
         gltf::image::Format::R16G16 => vk::Format::R16G16_UNORM,
         gltf::image::Format::R16G16B16 => vk::Format::R16G16B16_UNORM,
@@ -68,12 +69,24 @@ impl Object {
             .get_allocation_info(&eng.staging_buf.mem_alloc);
         let mut alloc_ptr = alloc_info.mapped_data as *mut u8;
 
+        // calculate image (texture.source) indices which have to be srgb
+        let mut srgb_indices = HashSet::new();
+        document.materials().for_each(|mat| {
+            mat.pbr_metallic_roughness().base_color_texture().map(|tex| {
+                srgb_indices.insert(tex.texture().source().index());
+            });
+
+            mat.emissive_texture().map(|tex| {
+                srgb_indices.insert(tex.texture().source().index());
+            });
+        });
+
         // textures need to be updated to add their bindless tex handles
         let images: Vec<Texture> = images
-            .iter()
-            .map(|image| {
+            .iter().enumerate()
+            .map(|(idx,image)| {
                 // create image
-                let vk_format = gltf_format_to_vulkan_format(image.format);
+                let vk_format = gltf_format_to_vulkan_format(image.format, srgb_indices.contains(&idx));
                 let vk_extent = vk::Extent2D::default()
                     .width(image.width)
                     .height(image.height);

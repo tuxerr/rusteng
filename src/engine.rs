@@ -481,8 +481,8 @@ impl Engine {
         unsafe {
             self.context
                 .device
-                //.wait_for_fences(&[frame_data.fence], true, u64::MAX)
-                .wait_for_fences(self.fences.as_slice(), true, u64::MAX)
+                .wait_for_fences(&[frame_data.fence], true, u64::MAX)
+                //.wait_for_fences(self.fences.as_slice(), true, u64::MAX)
                 .expect("Failure to wait on start-of-frame fence");
             self.context
                 .device
