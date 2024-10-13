@@ -580,6 +580,7 @@ pub struct Texture {
     pub vk_imageview: vk::ImageView,
     pub vk_sampler: vk::Sampler,
     pub bindless_handle: Option<u32>,
+    mipcount: u32,
 }
 
 impl Texture {
@@ -596,6 +597,14 @@ impl Texture {
             (ImageLayout::UNDEFINED, ImageAspectFlags::COLOR)
         };
 
+        let gen_mips =
+            aspect == ImageAspectFlags::COLOR && usage_flags.contains(vk::ImageUsageFlags::SAMPLED);
+        let mip_levels = if gen_mips {
+            std::cmp::max(extent.width, extent.height).ilog2() + 1
+        } else {
+            1
+        };
+
         let image_create_info = vk::ImageCreateInfo::default()
             .image_type(ImageType::TYPE_2D)
             .format(format)
@@ -604,7 +613,7 @@ impl Texture {
                 height: extent.height,
                 depth: 1,
             })
-            .mip_levels(1)
+            .mip_levels(mip_levels)
             .array_layers(1)
             .samples(SampleCountFlags::TYPE_1)
             .tiling(ImageTiling::OPTIMAL)
@@ -633,7 +642,7 @@ impl Texture {
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(aspect)
                     .layer_count(1)
-                    .level_count(1),
+                    .level_count(mip_levels),
             );
 
         let img_view = unsafe {
@@ -672,7 +681,130 @@ impl Texture {
             vk_imageview: img_view,
             vk_sampler: sampler,
             bindless_handle: None,
+            mipcount: mip_levels,
         }
+    }
+
+    pub fn load_pixel_data(&mut self, eng: &mut super::Engine, pixels: &Vec<u8>) {
+        let alloc_info = eng
+            .context
+            .vma_alloc
+            .get_allocation_info(&eng.staging_buf.mem_alloc);
+        let alloc_ptr = alloc_info.mapped_data as *mut u8;
+
+        assert!(
+            pixels.len() < alloc_info.size as usize,
+            "Staging buffer too small for texture upload"
+        );
+        unsafe {
+            std::ptr::copy_nonoverlapping(pixels.as_ptr(), alloc_ptr as *mut u8, pixels.len())
+        }
+
+        // copy staging buffer into texture and wait
+        eng.execute_synchronous_on_queue(eng.context.queues.gfx_queue, |commandbuffer| {
+            let transition_barrier = vk::ImageMemoryBarrier::default()
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .image(self.vk_image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .level_count(vk::REMAINING_MIP_LEVELS)
+                        .layer_count(vk::REMAINING_ARRAY_LAYERS),
+                );
+
+            let image_region = vk::BufferImageCopy::default()
+                .image_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .layer_count(1),
+                )
+                .image_extent(
+                    vk::Extent3D::default()
+                        .width(self.extent.width)
+                        .height(self.extent.height)
+                        .depth(1),
+                );
+
+            unsafe {
+                eng.context.device.cmd_pipeline_barrier(
+                    commandbuffer,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[transition_barrier],
+                );
+
+                eng.context.device.cmd_copy_buffer_to_image(
+                    commandbuffer,
+                    eng.staging_buf.vk_buffer,
+                    self.vk_image,
+                    vk::ImageLayout::GENERAL,
+                    &[image_region],
+                );
+            }
+
+            //generate mipmaps
+            if (self.mipcount > 1) {
+                let blit_barrier = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::GENERAL)
+                    .new_layout(vk::ImageLayout::GENERAL)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .dst_access_mask(
+                        vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::TRANSFER_WRITE,
+                    )
+                    .image(self.vk_image)
+                    .subresource_range(
+                        vk::ImageSubresourceRange::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .level_count(vk::REMAINING_MIP_LEVELS)
+                            .layer_count(vk::REMAINING_ARRAY_LAYERS),
+                    );
+
+                for mip_level in 1..self.mipcount {
+                    unsafe {
+                        eng.context.device.cmd_pipeline_barrier(
+                            commandbuffer,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::DependencyFlags::empty(),
+                            &[],
+                            &[],
+                            &[blit_barrier],
+                        );
+
+                        let src_subresource = vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .mip_level(mip_level-1)
+                            .base_array_layer(0)
+                            .layer_count(1);
+                        let src_offsets = [
+                            vk::Offset3D { x: 0, y: 0, z: 0},
+                            vk::Offset3D { x: (self.extent.width / 2u32.pow(mip_level-1)) as i32 , y: (self.extent.height / 2u32.pow(mip_level-1)) as i32, z: 1}
+                        ];
+                        let dst_subresource = vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .mip_level(mip_level)
+                            .base_array_layer(0)
+                            .layer_count(1);
+                        let dst_offsets = [
+                            vk::Offset3D { x: 0, y: 0, z: 0},
+                            vk::Offset3D { x: (self.extent.width / 2u32.pow(mip_level)) as i32 , y: (self.extent.height / 2u32.pow(mip_level)) as i32, z: 1}
+                        ];
+                        let blit_regions = [
+                            vk::ImageBlit::default().src_subresource(src_subresource).src_offsets(src_offsets).dst_subresource(dst_subresource).dst_offsets(dst_offsets)
+                        ];
+
+                        eng.context.device.cmd_blit_image(commandbuffer, self.vk_image, vk::ImageLayout::GENERAL, self.vk_image, vk::ImageLayout::GENERAL, &blit_regions, vk::Filter::LINEAR);
+                    }
+                }
+            }
+
+        });
     }
 
     pub fn destroy(&mut self, context: &VkContextData) {
