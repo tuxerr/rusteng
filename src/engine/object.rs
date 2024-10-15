@@ -1,14 +1,20 @@
+use crate::engine::shader_struct::MeshletEntry;
 use crate::engine::vkutil::Texture;
 
+use super::shader_struct::{self, MAX_MESHLET_VERTS, MAX_MESHLETS_TRIANGLES};
 use super::{shader_struct::VertexEntry, vkutil, Engine};
 use ash::vk;
 use cgmath::SquareMatrix;
 use derivative::Derivative;
 use gltf;
+use zerocopy::IntoBytes;
 use std::collections::HashSet;
 use std::path::Path;
 use std::rc::Rc;
 use std::{u32, u64};
+use meshopt;
+
+const MESHLETS_CONE_WEIGHT: f32 = 0.5;
 
 fn gltf_format_to_vulkan_format(format: gltf::image::Format, srgb: bool) -> vk::Format {
     match format {
@@ -63,6 +69,7 @@ pub struct Object {
 pub struct Primitive {
     pub ibo_slice: vkutil::BufferSlice,
     pub vbo_slice: vkutil::BufferSlice,
+    pub meshlet_slice: vkutil::BufferSlice,
     #[derivative(Default(value = "u32::MAX"))]
     pub base_color_tex: u32,
     #[derivative(Default(value = "u32::MAX"))]
@@ -173,6 +180,7 @@ impl Object {
         // read VBO, IBOs and materials
         let mut vboentry = Vec::new();
         let mut iboentry: Vec<u32> = Vec::new();
+        let mut meshletentry = Vec::new();
         let mut total_primitives = Vec::new();
 
         for mesh in document.meshes() {
@@ -186,6 +194,10 @@ impl Object {
 
                     let vbo_start_size = vboentry.len() * std::mem::size_of::<VertexEntry>();
                     let ibo_start_size = iboentry.len() * std::mem::size_of::<u32>();
+                    let meshlet_start_size = meshletentry.len() * std::mem::size_of::<MeshletEntry>();
+
+                    let mut primitive_vbo = Vec::new();
+                    let mut primitive_ibo = Vec::new();
 
                     let mat = primitive.material();
 
@@ -222,11 +234,9 @@ impl Object {
                     });
 
                     // indices
-                    let mut indices_pushed = false;
                     if let Some(iter) = reader.read_indices() {
                         for index in iter.into_u32() {
-                            iboentry.push(index);
-                            indices_pushed = true;
+                            primitive_ibo.push(index);
                         }
                     }
 
@@ -234,36 +244,40 @@ impl Object {
                         .read_tex_coords(0)
                         .map_or(vec![], |c| c.into_f32().collect());
                     let normals = reader.read_normals().map_or(vec![], |c| c.collect());
+                    let indices_pushed = !primitive_ibo.is_empty();
 
                     // positions
-                    let vboentry_size = vboentry.len();
                     if let Some(iter_pos) = reader.read_positions() {
                         for (idx, vertex_position) in iter_pos.enumerate() {
                             if indices_pushed == false {
-                                iboentry.push(vboentry.len() as u32);
+                                primitive_ibo.push(vboentry.len() as u32);
                             }
 
                             let uv = uvs
                                 .get(idx)
-                                .map_or(cgmath::Vector2::new(0.0f32, 0.0f32), |uv| {
-                                    cgmath::Vector2::from(*uv)
-                                });
+                                .map_or([0.0f32, 0.0f32], |uv| *uv);
                             let norm = normals
                                 .get(idx)
-                                .map_or(cgmath::Vector3::new(0.0f32, 0.0f32, 0.0f32), |norm| {
-                                    cgmath::Vector3::from(*norm)
-                                });
+                                .map_or([0.0f32, 0.0f32, 0.0f32], |norm| *norm);
 
-                            vboentry.push(VertexEntry {
-                                pos: cgmath::Vector3::from(vertex_position),
+                            primitive_vbo.push(VertexEntry {
+                                pos: vertex_position,
                                 norm: norm,
                                 uv: uv,
                             });
                         }
                     }
 
+                    let (mut new_ibo, mut new_vbo) = Self::optimize_primitive(primitive_ibo, primitive_vbo);
+                    let mut generated_meshlets = Self::generate_meshlets(&new_ibo, &new_vbo);
+
+                    vboentry.append(&mut new_vbo);
+                    iboentry.append(&mut new_ibo);
+                    meshletentry.append(&mut generated_meshlets);
+
                     let vbo_end_size = vboentry.len() * std::mem::size_of::<VertexEntry>();
                     let ibo_end_size = iboentry.len() * std::mem::size_of::<u32>();
+                    let meshlet_end_size = meshletentry.len() * std::mem::size_of::<MeshletEntry>();
 
                     let vbo_slice = vkutil::BufferSlice {
                         offset: vbo_start_size,
@@ -275,6 +289,11 @@ impl Object {
                         size: ibo_end_size - ibo_start_size,
                     };
 
+                    let meshlet_slice = vkutil::BufferSlice {
+                        offset: meshlet_start_size,
+                        size: meshlet_end_size - meshlet_start_size,
+                    };
+
                     Primitive {
                         base_color_tex: color_tex,
                         metallic_roughness_tex: metal_rough_tex,
@@ -283,6 +302,7 @@ impl Object {
                         emissive_tex: emissive_tex,
                         vbo_slice: vbo_slice,
                         ibo_slice: ibo_slice,
+                        meshlet_slice: meshlet_slice,
                     }
                 })
                 .collect();
@@ -297,10 +317,14 @@ impl Object {
         let ibo_slice = eng
             .global_ibo
             .allocate_slice_of_size(iboentry.len() * std::mem::size_of::<u32>());
+        let meshlet_slice = eng
+            .global_meshlets
+            .allocate_slice_of_size(meshletentry.len() * std::mem::size_of::<MeshletEntry>());
 
         total_primitives.iter_mut().for_each(|prim| {
             prim.ibo_slice.offset += ibo_slice.offset;
             prim.vbo_slice.offset += vbo_slice.offset;
+            prim.meshlet_slice.offset += meshlet_slice.offset;
         });
 
         // copy into staging buffer
@@ -321,6 +345,9 @@ impl Object {
 
             std::ptr::copy_nonoverlapping(iboentry.as_ptr(), alloc_ptr as *mut u32, iboentry.len());
             alloc_ptr = alloc_ptr.offset(ibo_slice.size as isize);
+
+            std::ptr::copy_nonoverlapping(meshletentry.as_ptr(), alloc_ptr as *mut MeshletEntry, meshletentry.len());
+            alloc_ptr = alloc_ptr.offset(meshlet_slice.size as isize);
         }
 
         // copy from staging to final VBO/IBO ssbos
@@ -333,6 +360,10 @@ impl Object {
                 .src_offset(vbo_slice.size as u64) // offset into the staging buffer
                 .dst_offset(ibo_slice.offset as u64)
                 .size(ibo_slice.size as u64)];
+            let meshlet_regions = [ash::vk::BufferCopy::default()
+                .src_offset((vbo_slice.size + ibo_slice.size) as u64) // offset into the staging buffer
+                .dst_offset(meshlet_slice.offset as u64)
+                .size(meshlet_slice.size as u64)];
 
             unsafe {
                 eng.context.device.cmd_copy_buffer(
@@ -347,6 +378,12 @@ impl Object {
                     eng.global_ibo.vk_buffer,
                     &ibo_regions,
                 );
+                eng.context.device.cmd_copy_buffer(
+                    commandbuffer,
+                    eng.staging_buf.vk_buffer,
+                    eng.global_meshlets.vk_buffer,
+                    &meshlet_regions,
+                );
             }
         });
 
@@ -358,5 +395,63 @@ impl Object {
             pipeline: pipeline,
             textures: images,
         }
+    }
+
+    fn optimize_primitive(ibo: Vec<u32>, vbo: Vec<VertexEntry>) -> (Vec<u32>, Vec<VertexEntry>) {
+        let vbo_size = vbo.len();
+        let ibo_size = ibo.len();
+
+        let (unique_vertices,remap_table) = meshopt::generate_vertex_remap(&vbo, Some(&ibo));
+        let new_ibo = meshopt::remap_index_buffer(Some(&ibo), unique_vertices, &remap_table);
+        let new_vbo = meshopt::remap_vertex_buffer(&vbo, unique_vertices, &remap_table);
+
+        let mut new_ibo = meshopt::optimize_vertex_cache(&new_ibo, unique_vertices);
+
+        let new_vbo = meshopt::optimize_vertex_fetch(&mut new_ibo, &new_vbo);
+
+        println!("Remapped VBO from {} to {} vertices, and IBO from {} to {} indices", 
+            vbo_size, 
+            new_vbo.len(), 
+            ibo_size,
+            new_ibo.len()
+        );
+
+        (new_ibo, new_vbo)
+    }
+
+    fn generate_meshlets(ibo: &Vec<u32>, vbo: &Vec<VertexEntry>) -> Vec<shader_struct::MeshletEntry> {
+        let u8_vbo_slice = vbo.as_slice().as_bytes();
+        let vertex_stride = std::mem::size_of::<VertexEntry>();
+        let position_offset = std::mem::offset_of!(VertexEntry,pos);
+        let vs_adapter = meshopt::VertexDataAdapter::new(u8_vbo_slice, vertex_stride, position_offset).expect("Failure to create meshopt VS adapter");
+
+        let meshlets = meshopt::build_meshlets(ibo.as_slice(), &vs_adapter, shader_struct::MAX_MESHLET_VERTS, shader_struct::MAX_MESHLETS_TRIANGLES, MESHLETS_CONE_WEIGHT);
+
+        let meshlets : Vec<shader_struct::MeshletEntry> = meshlets.iter().map(|m| {
+            let mut verts = [VertexEntry::default(); MAX_MESHLET_VERTS];
+            let mut indices = [0; MAX_MESHLETS_TRIANGLES * 3];
+            m.vertices.iter().enumerate().for_each(|(idx,v_idx)| {
+                verts[idx] = vbo[*v_idx as usize];
+            });
+            m.triangles.iter().enumerate().for_each(|(idx,i_idx)| {
+                indices[idx] = *i_idx;
+            });
+
+            let bounds = meshopt::compute_meshlet_bounds(m, &vs_adapter);
+            let pos_radius = [bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius];
+
+            shader_struct::MeshletEntry {
+                pos_radius,
+                verts,
+                indices,
+                triangle_count : (m.triangles.len() / 3) as u32,
+                primitive_id: 0,
+            }
+        }).collect();
+        
+        println!("Generated {} meshlets", 
+            meshlets.len()
+        );
+        meshlets
     }
 }

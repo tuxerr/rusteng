@@ -1,7 +1,5 @@
 use winit::{
-    application::ApplicationHandler, event::WindowEvent, 
-    event_loop::{ControlFlow, EventLoop}, 
-    raw_window_handle::{HasDisplayHandle, RawDisplayHandle}, window::Window
+    application::ApplicationHandler, event::WindowEvent, event_loop::{ControlFlow, EventLoop}, raw_window_handle::{HasDisplayHandle, RawDisplayHandle}, window::Window
 };
 
 
@@ -27,7 +25,8 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        let win_attrib = Window::default_attributes().with_title("Foxy");
+        let physical_size = winit::dpi::PhysicalSize { width : 1280, height : 1024 };
+        let win_attrib = Window::default_attributes().with_title("Foxy").with_inner_size(physical_size);
         let win = event_loop.create_window(win_attrib);
         let actual_win = win.expect("Failure to create window");
         self.engine.window_init(&actual_win);

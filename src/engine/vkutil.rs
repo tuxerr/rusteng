@@ -749,7 +749,7 @@ impl Texture {
             }
 
             //generate mipmaps
-            if (self.mipcount > 1) {
+            if self.mipcount > 1 {
                 let blit_barrier = vk::ImageMemoryBarrier::default()
                     .old_layout(vk::ImageLayout::GENERAL)
                     .new_layout(vk::ImageLayout::GENERAL)

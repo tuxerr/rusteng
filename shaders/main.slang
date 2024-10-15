@@ -21,6 +21,7 @@ cbuffer Constants {
     uint64_t objectCount;
     ConstBufferPointer<VertexEntry> vbo;
     ConstBufferPointer<ObjectEntry> objects;
+    ConstBufferPointer<MeshletEntry> meshlets;
     DrawBuffer *drawbuf;
 };
 

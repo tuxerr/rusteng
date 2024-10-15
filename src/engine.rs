@@ -13,7 +13,7 @@ use ash::vk::{self, PipelineLayout};
 
 use cgmath::{Deg, Matrix4, Point3, Vector3};
 use object::Object;
-use shader_struct::{ObjectEntry, VertexEntry};
+use shader_struct::VertexEntry;
 use std::rc::Rc;
 use std::{cmp, u32};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle};
@@ -39,6 +39,7 @@ pub struct Engine {
     draw_submit_compute_shader: vkutil::Pipeline,
     global_ibo: vkutil::Buffer,
     global_vbo: vkutil::Buffer,
+    global_meshlets: vkutil::Buffer,
     staging_buf: vkutil::Buffer,
     indirect_draw_buf: vkutil::Buffer,
 }
@@ -79,6 +80,13 @@ impl Engine {
         );
 
         let global_vbo = vkutil::Buffer::new_from_size_and_flags(
+            16 * 1024 * 1024,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
+            &context,
+        );
+
+        let global_meshlets = vkutil::Buffer::new_from_size_and_flags(
             16 * 1024 * 1024,
             vk::BufferUsageFlags::STORAGE_BUFFER,
             vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
@@ -133,7 +141,7 @@ impl Engine {
                         | vk::ShaderStageFlags::COMPUTE,
                 )
                 .offset(0)
-                .size(32), // 3 buffer device addresses for mesh and object data (3*8 = 24) + 8 for object count
+                .size(40), // 3 buffer device addresses for mesh and object data (3*8 = 24) + 8 for object count
         ];
 
         let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::default()
@@ -201,6 +209,7 @@ impl Engine {
             draw_submit_compute_shader,
             global_ibo,
             global_vbo,
+            global_meshlets,
             staging_buf,
             indirect_draw_buf,
         };
@@ -271,17 +280,18 @@ impl Engine {
             &self.opaque_layout,
         ));
 
-        /* let mut helmet_obj = object::Object::loadObjectInEngine(
+        let mut helmet_obj = object::Object::loadObjectInEngine(
             self,
             String::from("DamagedHelmet.glb"),
             opaque_pbr_shader.clone(),
         );
         helmet_obj.transform = helmet_obj.transform * Matrix4::from_angle_x(Deg(90.0));
-        self.objects.push(helmet_obj); */
+        self.objects.push(helmet_obj); 
 
-        let mut fox_obj = object::Object::loadObjectInEngine(
+        /*let mut fox_obj = object::Object::loadObjectInEngine(
             self,
             String::from("Sponza/Sponza.gltf"),
+            //String::from("ToyCar.glb"),
             opaque_pbr_shader.clone(),
         );
         fox_obj.transform = fox_obj.transform
@@ -292,7 +302,7 @@ impl Engine {
             });
         fox_obj.transform = fox_obj.transform * Matrix4::from_scale(0.02f32);
 
-        self.objects.push(fox_obj);
+        self.objects.push(helmet_obj); */
     }
 
     pub fn window_init(&mut self, window: &winit::window::Window) {
@@ -674,17 +684,22 @@ impl Engine {
         // calculate per-object frame structure
         let mut object_ssbo: Vec<shader_struct::ObjectEntry> = Vec::new();
         let proj_matrix = cgmath::perspective(Deg(45.0f32), aspect, 0.1f32, 200.0f32);
-        let cam_transform = Matrix4::look_at_rh(
+        /*let cam_transform = Matrix4::look_at_rh(
             Point3::new(-27.0f32, 2.3f32, -1.5f32),
             Point3::new(15.0f32, 8.0f32, 0.0f32),
             Vector3::new(0.0f32, -1.0f32, 0.0f32),
+        );*/
+        let cam_transform = Matrix4::look_at_rh(
+            Point3::new(-5.0f32, 2.3f32, -1.5f32),
+            Point3::new(0.0f32, 0.0f32, 0.0f32),
+            Vector3::new(0.0f32, -1.0f32, 0.0f32),
         );
 
-        // let obj_rotation = Matrix4::from_angle_y(Deg(1.0f32 * self.frame_index as f32));
+        let obj_rotation = Matrix4::from_angle_y(Deg(1.0f32 * self.frame_index as f32));
 
         for obj in &self.objects {
             for prim in obj.primitives.iter() {
-                let obj_matrix = /*obj_rotation * */obj.transform;
+                let obj_matrix = obj_rotation * obj.transform;
                 let obj_pos = obj_matrix.z;
                 let mvp = proj_matrix * cam_transform * obj_matrix;
 
@@ -744,11 +759,12 @@ impl Engine {
             object_count: object_ssbo.len().try_into().unwrap(),
             vbo: self.global_vbo.buffer_address,
             objects: frame_data.scene_buffer.buffer_address,
+            meshlets: self.global_meshlets.buffer_address,
             drawbuf: self.indirect_draw_buf.buffer_address,
         };
 
         unsafe {
-            let push_constant_addresses_u8: [u8; 32] = std::mem::transmute(push_constants);
+            let push_constant_addresses_u8: [u8; 40] = std::mem::transmute(push_constants);
             self.context.device.cmd_push_constants(
                 *commandbuffer,
                 self.opaque_layout,

@@ -11,6 +11,9 @@ ash = { version = "0.38.0", features = ["linked"] }
 ash-window = "0.13.0"
 vk-mem = "0.4.0"
 derivative = "2.2.0"
+meshopt = "0.3.0"
+zerocopy = "0.8.5"
+zerocopy-derive = "0.8.5"
 
 [[bin]]
 name = "force-build"
