@@ -11,7 +11,7 @@ const MAX_BINDLESS_TEXTURES: u32 = 100000;
 
 use ash::vk::{self, PipelineLayout};
 
-use cgmath::{Deg, Matrix4, Point3, Vector3};
+use cgmath::{Deg, Matrix4, Point3, SquareMatrix, Vector3};
 use object::Object;
 use shader_struct::VertexEntry;
 use std::rc::Rc;
@@ -31,24 +31,26 @@ pub struct Engine {
     semaphores: Vec<vk::Semaphore>,
     fences: Vec<vk::Fence>,
     objects: Vec<Object>,
-    scene_buffers: Vec<vkutil::Buffer>,
+    view_matrix: cgmath::Matrix4<f32>,
     opaque_layout: PipelineLayout,
     bindless_texture_descriptorset_layout: vk::DescriptorSetLayout,
     bindless_texture_descriptorset: vk::DescriptorSet,
     bindless_handle: u32,
     draw_submit_compute_shader: vkutil::Pipeline,
+    meshlet_submit_compute_shader: vkutil::Pipeline,
     global_ibo: vkutil::Buffer,
     global_vbo: vkutil::Buffer,
     global_meshlets: vkutil::Buffer,
+    global_primitives: vkutil::Buffer,
     staging_buf: vkutil::Buffer,
     indirect_draw_buf: vkutil::Buffer,
+    render_mode: RenderMode,
 }
 
 struct FrameData<'a> {
     commandpool: vk::CommandPool,
     semaphores: &'a [vk::Semaphore],
     fence: vk::Fence,
-    scene_buffer: &'a vkutil::Buffer,
 }
 
 impl<'a> FrameData<'_> {
@@ -57,9 +59,15 @@ impl<'a> FrameData<'_> {
             commandpool: engine.commandpools[1 + indexer],
             semaphores: &engine.semaphores[1 + indexer * 2..indexer * 2 + 3],
             fence: engine.fences[1 + indexer],
-            scene_buffer: &engine.scene_buffers[indexer],
         }
     }
+}
+
+#[derive(PartialEq)]
+enum RenderMode {
+    Draw,
+    DrawIndirect,
+    Meshlet
 }
 
 impl Engine {
@@ -87,6 +95,13 @@ impl Engine {
         );
 
         let global_meshlets = vkutil::Buffer::new_from_size_and_flags(
+            16 * 1024 * 1024,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
+            &context,
+        );
+
+        let global_primitives = vkutil::Buffer::new_from_size_and_flags(
             16 * 1024 * 1024,
             vk::BufferUsageFlags::STORAGE_BUFFER,
             vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
@@ -188,6 +203,14 @@ impl Engine {
                 &opaque_mesh_layout,
             );
 
+        let compute_meshletsubmit_shader_name = String::from("meshlet_submit");
+        let meshlet_submit_compute_shader =
+                vkutil::Pipeline::load_compute_pipeline_from_name_and_layout(
+                    &compute_meshletsubmit_shader_name,
+                    &context,
+                    &opaque_mesh_layout,
+                );
+
         let mut eng = Engine {
             frame_index: 0,
             context: context,
@@ -201,17 +224,20 @@ impl Engine {
             semaphores: Vec::new(),
             fences: Vec::new(),
             objects: Vec::new(),
-            scene_buffers: Vec::new(),
+            view_matrix: cgmath::Matrix4::identity(),
             opaque_layout: opaque_mesh_layout,
             bindless_texture_descriptorset_layout: bindless_texture_descriptorset_layouts[0],
             bindless_texture_descriptorset: descriptor_set,
             bindless_handle: 0,
             draw_submit_compute_shader,
+            meshlet_submit_compute_shader,
             global_ibo,
             global_vbo,
             global_meshlets,
+            global_primitives,
             staging_buf,
             indirect_draw_buf,
+            render_mode: RenderMode::Meshlet,
         };
 
         eng.render_init();
@@ -222,16 +248,6 @@ impl Engine {
     fn render_init(&mut self) {
         println!("Initializing engine datastructures");
         let structure_depth = MAX_FRAMES_IN_FLIGHT + 1;
-        for _ in 0..MAX_FRAMES_IN_FLIGHT {
-            let global_scene = vkutil::Buffer::new_from_size_and_flags(
-                4 * 1024 * 1024 as usize,
-                vk::BufferUsageFlags::STORAGE_BUFFER,
-                vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
-                &self.context,
-            );
-            self.scene_buffers.push(global_scene);
-        }
-
         for _ in 0..structure_depth {
             let cmdpool_create_info = vk::CommandPoolCreateInfo::default()
                 .queue_family_index(self.context.queues.gfx_queue_idx)
@@ -280,29 +296,37 @@ impl Engine {
             &self.opaque_layout,
         ));
 
-        let mut helmet_obj = object::Object::loadObjectInEngine(
+        /*let mut helmet_obj = object::Object::loadObjectInEngine(
             self,
             String::from("DamagedHelmet.glb"),
             opaque_pbr_shader.clone(),
         );
         helmet_obj.transform = helmet_obj.transform * Matrix4::from_angle_x(Deg(90.0));
-        self.objects.push(helmet_obj); 
+        self.objects.push(helmet_obj); */
 
-        /*let mut fox_obj = object::Object::loadObjectInEngine(
+        let mut fox_obj = object::Object::loadObjectInEngine(
             self,
-            String::from("Sponza/Sponza.gltf"),
-            //String::from("ToyCar.glb"),
+            //String::from("Sponza/Sponza.gltf"),
+            String::from("ToyCar.glb"),
             opaque_pbr_shader.clone(),
         );
-        fox_obj.transform = fox_obj.transform
-            * Matrix4::from_translation(Vector3 {
-                x: (1.0),
-                y: (0.0),
-                z: (0.0),
-            });
+        fox_obj.transform = fox_obj.transform * Matrix4::from_angle_x(Deg(90.0));
+
         fox_obj.transform = fox_obj.transform * Matrix4::from_scale(0.02f32);
 
-        self.objects.push(helmet_obj); */
+        /*let cam_transform = Matrix4::look_at_rh(
+            Point3::new(-27.0f32, 2.3f32, -1.5f32),
+            Point3::new(15.0f32, 8.0f32, 0.0f32),
+            Vector3::new(0.0f32, -1.0f32, 0.0f32),
+        );*/
+        let cam_transform = Matrix4::look_at_rh(
+            Point3::new(-15.0f32, 2.3f32, -1.5f32),
+            Point3::new(0.0f32, 0.0f32, 0.0f32),
+            Vector3::new(0.0f32, -1.0f32, 0.0f32),
+        );
+
+        self.view_matrix = cam_transform;
+        self.objects.push(fox_obj); 
     }
 
     pub fn window_init(&mut self, window: &winit::window::Window) {
@@ -476,6 +500,8 @@ impl Engine {
                 .expect("Failure to wait for staging fence");
         }
     }
+
+//    pub fn allocate_primitiveid
 
     pub fn render(&mut self) {
         self.frame_index += 1;
@@ -664,7 +690,6 @@ impl Engine {
             .width(self.swapchain_extent.width as f32)
             .height(self.swapchain_extent.height as f32);
         let scissor = vk::Rect2D::default().extent(self.swapchain_extent);
-        let aspect = self.swapchain_extent.width as f32 / self.swapchain_extent.height as f32;
 
         unsafe {
             self.context
@@ -682,18 +707,11 @@ impl Engine {
         };
 
         // calculate per-object frame structure
-        let mut object_ssbo: Vec<shader_struct::ObjectEntry> = Vec::new();
-        let proj_matrix = cgmath::perspective(Deg(45.0f32), aspect, 0.1f32, 200.0f32);
-        /*let cam_transform = Matrix4::look_at_rh(
-            Point3::new(-27.0f32, 2.3f32, -1.5f32),
-            Point3::new(15.0f32, 8.0f32, 0.0f32),
-            Vector3::new(0.0f32, -1.0f32, 0.0f32),
-        );*/
-        let cam_transform = Matrix4::look_at_rh(
-            Point3::new(-5.0f32, 2.3f32, -1.5f32),
-            Point3::new(0.0f32, 0.0f32, 0.0f32),
-            Vector3::new(0.0f32, -1.0f32, 0.0f32),
-        );
+        let mut object_ssbo: Vec<shader_struct::PrimitiveEntry> = Vec::new();
+
+        // projection matrix
+        let aspect = self.swapchain_extent.width as f32 / self.swapchain_extent.height as f32;
+        let proj_matrix = cgmath::perspective(Deg(45.0f32), 1280.0/800.0, 0.1f32, 200.0f32);
 
         let obj_rotation = Matrix4::from_angle_y(Deg(1.0f32 * self.frame_index as f32));
 
@@ -701,9 +719,9 @@ impl Engine {
             for prim in obj.primitives.iter() {
                 let obj_matrix = obj_rotation * obj.transform;
                 let obj_pos = obj_matrix.z;
-                let mvp = proj_matrix * cam_transform * obj_matrix;
+                let mvp = proj_matrix * self.view_matrix * obj_matrix;
 
-                let obj_entry = shader_struct::ObjectEntry {
+                let obj_entry = shader_struct::PrimitiveEntry {
                     model_view_projection: mvp,
                     position: obj_pos,
                     //sphere_size: 1.0f32,
@@ -729,11 +747,11 @@ impl Engine {
         unsafe {
             std::ptr::copy_nonoverlapping(
                 object_ssbo.as_ptr(),
-                staging_alloc_ptr as *mut shader_struct::ObjectEntry,
+                staging_alloc_ptr as *mut shader_struct::PrimitiveEntry,
                 object_ssbo.len(),
             );
             let object_ssbo_size =
-                object_ssbo.len() * std::mem::size_of::<shader_struct::ObjectEntry>();
+                object_ssbo.len() * std::mem::size_of::<shader_struct::PrimitiveEntry>();
             let staging_region = [ash::vk::BufferCopy::default()
                 .src_offset(0)
                 .dst_offset(0)
@@ -741,10 +759,10 @@ impl Engine {
             self.context.device.cmd_copy_buffer(
                 *commandbuffer,
                 self.staging_buf.vk_buffer,
-                frame_data.scene_buffer.vk_buffer,
+                self.global_primitives.vk_buffer,
                 &staging_region,
             );
-            frame_data.scene_buffer.enqueue_barrier(
+            self.global_primitives.enqueue_barrier(
                 &self.context,
                 commandbuffer,
                 vk::PipelineStageFlags::TRANSFER,
@@ -754,11 +772,17 @@ impl Engine {
             );
         }
 
+        let object_count : u64 = match self.render_mode {
+            RenderMode::DrawIndirect => object_ssbo.len().try_into().unwrap(),
+            RenderMode::Draw => self.objects.len() as u64,
+            RenderMode::Meshlet => (self.global_meshlets.allocated_size() / std::mem::size_of::<shader_struct::MeshletEntry>()) as u64,
+        };
+
         // send over push constants and descriptors
         let push_constants = shader_struct::PushConstants {
-            object_count: object_ssbo.len().try_into().unwrap(),
+            object_count: object_count,
             vbo: self.global_vbo.buffer_address,
-            objects: frame_data.scene_buffer.buffer_address,
+            objects: self.global_primitives.buffer_address,
             meshlets: self.global_meshlets.buffer_address,
             drawbuf: self.indirect_draw_buf.buffer_address,
         };
@@ -803,12 +827,22 @@ impl Engine {
                 vk::AccessFlags::TRANSFER_WRITE,
                 vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
             );
-            self.context.device.cmd_bind_pipeline(
-                *commandbuffer,
-                vk::PipelineBindPoint::COMPUTE,
-                self.draw_submit_compute_shader.vk_pipeline,
-            );
-            let dispatch_size = u32::div_ceil(object_ssbo.len() as u32, 64);
+
+            if(self.render_mode == RenderMode::DrawIndirect) {
+                self.context.device.cmd_bind_pipeline(
+                    *commandbuffer,
+                    vk::PipelineBindPoint::COMPUTE,
+                    self.draw_submit_compute_shader.vk_pipeline,
+                );
+            } else if(self.render_mode == RenderMode::Meshlet) {
+                self.context.device.cmd_bind_pipeline(
+                    *commandbuffer,
+                    vk::PipelineBindPoint::COMPUTE,
+                    self.meshlet_submit_compute_shader.vk_pipeline,
+                );
+            }
+
+            let dispatch_size = u32::div_ceil(object_count as u32, 64);
             //let dispatch_size = 1;
             self.context
                 .device
@@ -922,12 +956,10 @@ impl Drop for Engine {
 
         self.global_ibo.destroy(&self.context);
         self.global_vbo.destroy(&self.context);
+        self.global_meshlets.destroy(&self.context);
+        self.global_primitives.destroy(&self.context);
         self.staging_buf.destroy(&self.context);
         self.indirect_draw_buf.destroy(&self.context);
-
-        self.scene_buffers
-            .iter_mut()
-            .for_each(|b| b.destroy(&self.context));
 
         if let Some(depth_buffer) = &mut self.depth_buffer {
             depth_buffer.destroy(&self.context);

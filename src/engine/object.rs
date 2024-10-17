@@ -1,8 +1,9 @@
 use crate::engine::shader_struct::MeshletEntry;
 use crate::engine::vkutil::Texture;
+use crate::engine::RenderMode;
 
 use super::shader_struct::{self, MAX_MESHLET_VERTS, MAX_MESHLETS_TRIANGLES};
-use super::{shader_struct::VertexEntry, vkutil, Engine};
+use super::{shader_struct::*, vkutil, Engine};
 use ash::vk;
 use cgmath::SquareMatrix;
 use derivative::Derivative;
@@ -60,8 +61,9 @@ pub struct Object {
     pub transform: cgmath::Matrix4<f32>,
     pub gltf_document: gltf::Document,
     pub primitives: Vec<Primitive>,
+    pub primitive_slice: vkutil::BufferSlice, // primitive slice in the global primitive ssbo
     pub pipeline: Rc<vkutil::Pipeline>,
-    pub textures: Vec<super::vkutil::Texture>,
+    pub textures: Vec<super::vkutil::Texture>
 }
 
 #[derive(Derivative)]
@@ -70,6 +72,7 @@ pub struct Primitive {
     pub ibo_slice: vkutil::BufferSlice,
     pub vbo_slice: vkutil::BufferSlice,
     pub meshlet_slice: vkutil::BufferSlice,
+    pub primitive_id: u32,
     #[derivative(Default(value = "u32::MAX"))]
     pub base_color_tex: u32,
     #[derivative(Default(value = "u32::MAX"))]
@@ -182,6 +185,10 @@ impl Object {
         let mut iboentry: Vec<u32> = Vec::new();
         let mut meshletentry = Vec::new();
         let mut total_primitives = Vec::new();
+        let mut current_prim_idx = 0u32;
+        let primitive_count: usize = document.meshes().map( |m| m.primitives().count() ).sum();
+        let primitive_slice = eng.global_primitives.allocate_slice_of_size(primitive_count * std::mem::size_of::<PrimitiveEntry>());
+        let initial_primitive_offset = (primitive_slice.offset / std::mem::size_of::<PrimitiveEntry>()) as u32;
 
         for mesh in document.meshes() {
             println!("Mesh #{}", mesh.index());
@@ -191,6 +198,8 @@ impl Object {
                 .map(|primitive| {
                     println!("- Primitive #{}", primitive.index());
                     let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
+                    let global_prim_idx = initial_primitive_offset + current_prim_idx;
+                    current_prim_idx += 1;
 
                     let vbo_start_size = vboentry.len() * std::mem::size_of::<VertexEntry>();
                     let ibo_start_size = iboentry.len() * std::mem::size_of::<u32>();
@@ -269,10 +278,24 @@ impl Object {
                     }
 
                     let (mut new_ibo, mut new_vbo) = Self::optimize_primitive(primitive_ibo, primitive_vbo);
-                    let mut generated_meshlets = Self::generate_meshlets(&new_ibo, &new_vbo);
+                    let mut generated_meshlets = Self::generate_meshlets(&new_ibo, &new_vbo, global_prim_idx);
 
                     vboentry.append(&mut new_vbo);
-                    iboentry.append(&mut new_ibo);
+                    if eng.render_mode == RenderMode::Meshlet {
+                        let mut meshlet_ibo: Vec<u32> = Vec::new();
+                        generated_meshlets.iter_mut().for_each(|meshlet| {
+                            meshlet.triangle_offset_in_primitive = meshlet_ibo.len() as u32;
+                            for tri_idx in 0..meshlet.triangle_count as usize {
+                                meshlet_ibo.push(meshlet.indices[tri_idx*3+0] as u32);
+                                meshlet_ibo.push(meshlet.indices[tri_idx*3+1] as u32);
+                                meshlet_ibo.push(meshlet.indices[tri_idx*3+2] as u32);
+                            }
+                        });
+                        iboentry.append(&mut meshlet_ibo);
+                    } else {
+                        iboentry.append(&mut new_ibo);
+                    }
+                    
                     meshletentry.append(&mut generated_meshlets);
 
                     let vbo_end_size = vboentry.len() * std::mem::size_of::<VertexEntry>();
@@ -295,14 +318,15 @@ impl Object {
                     };
 
                     Primitive {
+                        vbo_slice: vbo_slice,
+                        ibo_slice: ibo_slice,
+                        meshlet_slice: meshlet_slice,
+                        primitive_id: global_prim_idx,
                         base_color_tex: color_tex,
                         metallic_roughness_tex: metal_rough_tex,
                         occlusion_tex: occlusion_tex,
                         normal_tex: normal_tex,
                         emissive_tex: emissive_tex,
-                        vbo_slice: vbo_slice,
-                        ibo_slice: ibo_slice,
-                        meshlet_slice: meshlet_slice,
                     }
                 })
                 .collect();
@@ -392,6 +416,7 @@ impl Object {
             transform: cgmath::Matrix4::identity(),
             gltf_document: document,
             primitives: total_primitives,
+            primitive_slice: primitive_slice,
             pipeline: pipeline,
             textures: images,
         }
@@ -419,7 +444,7 @@ impl Object {
         (new_ibo, new_vbo)
     }
 
-    fn generate_meshlets(ibo: &Vec<u32>, vbo: &Vec<VertexEntry>) -> Vec<shader_struct::MeshletEntry> {
+    fn generate_meshlets(ibo: &Vec<u32>, vbo: &Vec<VertexEntry>, global_prim_idx: u32) -> Vec<shader_struct::MeshletEntry> {
         let u8_vbo_slice = vbo.as_slice().as_bytes();
         let vertex_stride = std::mem::size_of::<VertexEntry>();
         let position_offset = std::mem::offset_of!(VertexEntry,pos);
@@ -445,7 +470,8 @@ impl Object {
                 verts,
                 indices,
                 triangle_count : (m.triangles.len() / 3) as u32,
-                primitive_id: 0,
+                triangle_offset_in_primitive : 0, // to be filled later after IBO packing
+                primitive_id: global_prim_idx,
             }
         }).collect();
         

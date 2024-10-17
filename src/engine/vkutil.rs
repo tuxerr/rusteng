@@ -541,6 +541,10 @@ impl Buffer {
         new_slice
     }
 
+    pub fn allocated_size(&self) -> usize {
+        return self.allocated_slices.last().map_or(0, |slice| slice.offset + slice.size);
+    }
+
     pub fn enqueue_barrier(
         &self,
         context: &VkContextData,

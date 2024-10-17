@@ -28,11 +28,12 @@ pub struct MeshletEntry {
     pub verts: [VertexEntry; MAX_MESHLET_VERTS],
     pub indices: [u8; MAX_MESHLETS_TRIANGLES * 3],
     pub triangle_count: u32,
+    pub triangle_offset_in_primitive: u32,
     pub primitive_id: u32
 }
 
 #[repr(C)]
-pub struct ObjectEntry {
+pub struct PrimitiveEntry {
     pub model_view_projection: cgmath::Matrix4<f32>,
     pub position: cgmath::Vector4<f32>,
     //pub sphere_size: f32,

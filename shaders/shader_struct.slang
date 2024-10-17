@@ -25,6 +25,7 @@ public struct MeshletEntry
     public VertexEntry verts[MAX_MESHLET_VERTS];
     public uint8_t indices[MAX_MESHLETS_TRIANGLES * 3];
     public uint triangle_count;
+    public uint triangle_offset_in_primitive;
     public uint primitive_id;
 }
 
