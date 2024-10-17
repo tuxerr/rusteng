@@ -65,6 +65,6 @@ float4 fragmentMain(CoarseVertex coarseVertex: CoarseVertex) : SV_Target
 
     color.x = (coarseVertex.meshletID % 12) / 12.0;
     color.y = ((coarseVertex.meshletID / 12) % 12) / 12.0;
-    color.z = ((coarseVertex.meshletID / 144) % 12) / 12.0;
+    //color.z = ((coarseVertex.meshletID / 144) % 12) / 12.0;
     return color;
 }

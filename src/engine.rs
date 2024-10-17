@@ -306,24 +306,24 @@ impl Engine {
 
         let mut fox_obj = object::Object::loadObjectInEngine(
             self,
-            //String::from("Sponza/Sponza.gltf"),
-            String::from("ToyCar.glb"),
+            String::from("Sponza/Sponza.gltf"),
+            //String::from("ToyCar.glb"),
             opaque_pbr_shader.clone(),
         );
-        fox_obj.transform = fox_obj.transform * Matrix4::from_angle_x(Deg(90.0));
+        //fox_obj.transform = fox_obj.transform * Matrix4::from_angle_x(Deg(90.0));
 
         fox_obj.transform = fox_obj.transform * Matrix4::from_scale(0.02f32);
 
-        /*let cam_transform = Matrix4::look_at_rh(
+        let cam_transform = Matrix4::look_at_rh(
             Point3::new(-27.0f32, 2.3f32, -1.5f32),
             Point3::new(15.0f32, 8.0f32, 0.0f32),
             Vector3::new(0.0f32, -1.0f32, 0.0f32),
-        );*/
-        let cam_transform = Matrix4::look_at_rh(
+        );
+        /*let cam_transform = Matrix4::look_at_rh(
             Point3::new(-15.0f32, 2.3f32, -1.5f32),
             Point3::new(0.0f32, 0.0f32, 0.0f32),
             Vector3::new(0.0f32, -1.0f32, 0.0f32),
-        );
+        );*/
 
         self.view_matrix = cam_transform;
         self.objects.push(fox_obj); 
@@ -713,7 +713,8 @@ impl Engine {
         let aspect = self.swapchain_extent.width as f32 / self.swapchain_extent.height as f32;
         let proj_matrix = cgmath::perspective(Deg(45.0f32), 1280.0/800.0, 0.1f32, 200.0f32);
 
-        let obj_rotation = Matrix4::from_angle_y(Deg(1.0f32 * self.frame_index as f32));
+        //let obj_rotation = Matrix4::from_angle_y(Deg(1.0f32 * self.frame_index as f32));
+        let obj_rotation = Matrix4::identity();
 
         for obj in &self.objects {
             for prim in obj.primitives.iter() {
