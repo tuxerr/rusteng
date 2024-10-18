@@ -2,18 +2,6 @@
 
 import shader_struct;
 
-struct VertexStageOutput
-{
-    CoarseVertex       coarseVertex : CoarseVertex;
-    float4          sv_position     : SV_Position;
-};
-
-struct CoarseVertex {
-    float2 uv;
-    uint iid;
-    uint meshletID;
-};
-
 [vk::binding(0, 0)] 
 Sampler2D bindlessTextures[];
 
@@ -22,9 +10,49 @@ cbuffer Constants {
     uint64_t objectCount;
     ConstBufferPointer<VertexEntry> vbo;
     ConstBufferPointer<ObjectEntry> objects;
-    ConstBufferPointer<MeshletEntry> meshlets;
+    MeshletEntry* meshlets;
     DrawBuffer *drawbuf;
 };
+
+[shader("mesh")]
+[outputtopology("triangle")]
+[numthreads(64, 1, 1)] // 1 thread per vertex, 2 triangle per thread
+void meshMain(in uint3 groupID: SV_GroupID,
+              in uint3 groupThreadID: SV_GroupThreadID,
+              out vertices VertexStageOutput verts[64],
+              out indices uint3 triangles[124])
+{
+    uint meshletid = groupID.x;
+    if (meshletid >= objectCount) {
+        return;
+    }
+
+    const MeshletEntry *meshlet = meshlets + meshletid;
+
+    ObjectEntry obj = objects[meshlet->primitive_id];
+    SetMeshOutputCounts(meshlet->vertex_count, meshlet->triangle_count);
+
+    uint vertexID = groupThreadID.x;
+    if (vertexID < meshlet->vertex_count) {
+        VertexStageOutput vso;
+        VertexEntry av = meshlet->verts[vertexID];
+        vso.sv_position = mul(obj.modelViewProj, float4(av.getPosition(), 1.0));
+        vso.coarseVertex.uv = av.getUV();
+        vso.coarseVertex.iid = meshlet->primitive_id;
+        vso.coarseVertex.meshletID = meshletid;
+        verts[vertexID] = vso;
+    }
+
+    uint triangle_id = groupThreadID.x;
+    if (triangle_id < meshlet->triangle_count) {
+        triangles[triangle_id] = uint3(meshlet->indices[triangle_id * 3], meshlet->indices[triangle_id * 3 + 1], meshlet.indices[triangle_id * 3 + 2]);
+    }
+
+    triangle_id += 64;
+    if (triangle_id < meshlet->triangle_count) {
+        triangles[triangle_id] = uint3(meshlet->indices[triangle_id * 3], meshlet->indices[triangle_id * 3 + 1], meshlet.indices[triangle_id * 3 + 2]);
+    }
+}
 
 [shader("vertex")]
 VertexStageOutput vertexMain(

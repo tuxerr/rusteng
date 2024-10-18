@@ -27,6 +27,7 @@ pub struct MeshletEntry {
     pub pos_radius: [f32; 4],
     pub verts: [VertexEntry; MAX_MESHLET_VERTS],
     pub indices: [u8; MAX_MESHLETS_TRIANGLES * 3],
+    pub vertex_count: u32,
     pub triangle_count: u32,
     pub triangle_offset_in_primitive: u32,
     pub primitive_id: u32

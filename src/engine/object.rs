@@ -469,6 +469,7 @@ impl Object {
                 pos_radius,
                 verts,
                 indices,
+                vertex_count : m.vertices.len() as u32,
                 triangle_count : (m.triangles.len() / 3) as u32,
                 triangle_offset_in_primitive : 0, // to be filled later after IBO packing
                 primitive_id: global_prim_idx,

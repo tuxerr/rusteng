@@ -2,9 +2,10 @@ pub mod object;
 pub mod shader_struct;
 pub mod vkutil;
 
-const REQUIRED_DEVICE_EXTENSIONS: [*const i8; 2] = [
+const REQUIRED_DEVICE_EXTENSIONS: [*const i8; 3] = [
     ash::khr::swapchain::NAME.as_ptr(),
     ash::khr::dynamic_rendering::NAME.as_ptr(),
+    ash::ext::mesh_shader::NAME.as_ptr()
 ];
 const MAX_FRAMES_IN_FLIGHT: u32 = 3;
 const MAX_BINDLESS_TEXTURES: u32 = 100000;
@@ -153,7 +154,8 @@ impl Engine {
                 .stage_flags(
                     vk::ShaderStageFlags::VERTEX
                         | vk::ShaderStageFlags::FRAGMENT
-                        | vk::ShaderStageFlags::COMPUTE,
+                        | vk::ShaderStageFlags::COMPUTE
+                        | vk::ShaderStageFlags::MESH_EXT,
                 )
                 .offset(0)
                 .size(40), // 3 buffer device addresses for mesh and object data (3*8 = 24) + 8 for object count
@@ -290,10 +292,12 @@ impl Engine {
 
     fn scene_init(&mut self) {
         let opaque_pbr_shader_name = String::from("main");
+        let is_mesh = self.render_mode == RenderMode::Meshlet;
         let opaque_pbr_shader = Rc::new(vkutil::Pipeline::load_gfx_pipeline_from_name_and_layout(
             &opaque_pbr_shader_name,
             &self.context,
             &self.opaque_layout,
+            is_mesh
         ));
 
         /*let mut helmet_obj = object::Object::loadObjectInEngine(
@@ -683,6 +687,8 @@ impl Engine {
     ) {
         let dynrend_loader =
             ash::khr::dynamic_rendering::Device::new(&self.context.instance, &self.context.device);
+        let mesh_loader = 
+            ash::ext::mesh_shader::Device::new(&self.context.instance, &self.context.device);
 
         // set scissor and viewports
         let viewport = vk::Viewport::default()
@@ -767,7 +773,7 @@ impl Engine {
                 &self.context,
                 commandbuffer,
                 vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::VERTEX_SHADER,
+                vk::PipelineStageFlags::VERTEX_SHADER | vk::PipelineStageFlags::MESH_SHADER_EXT,
                 vk::AccessFlags::TRANSFER_WRITE,
                 vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
             );
@@ -795,7 +801,8 @@ impl Engine {
                 self.opaque_layout,
                 vk::ShaderStageFlags::VERTEX
                     | vk::ShaderStageFlags::FRAGMENT
-                    | vk::ShaderStageFlags::COMPUTE,
+                    | vk::ShaderStageFlags::COMPUTE
+                    | vk::ShaderStageFlags::MESH_EXT,
                 0,
                 &push_constant_addresses_u8[..],
             );
@@ -857,13 +864,13 @@ impl Engine {
                 vk::AccessFlags::SHADER_WRITE,
                 vk::AccessFlags::INDIRECT_COMMAND_READ,
             );
+                        // draw indirect command on the above buffer
+                        self.context.device.cmd_bind_pipeline(
+                            *commandbuffer,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            self.objects[0].pipeline.vk_pipeline,
+                        );
 
-            // draw indirect command on the above buffer
-            self.context.device.cmd_bind_pipeline(
-                *commandbuffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.objects[0].pipeline.vk_pipeline,
-            );
         }
 
         // start dynamic rendering
@@ -899,8 +906,11 @@ impl Engine {
             )
         }
 
+        
+        if(self.render_mode == RenderMode::DrawIndirect) {
         // execute indirect draw based on above buffer
         unsafe {
+
             self.context.device.cmd_draw_indexed_indirect_count(
                 *commandbuffer,
                 self.indirect_draw_buf.vk_buffer,
@@ -911,6 +921,12 @@ impl Engine {
                 std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32,
             );
         }
+        } else if(self.render_mode == RenderMode::Meshlet) {
+            unsafe {
+                mesh_loader.cmd_draw_mesh_tasks(*commandbuffer, object_count as u32, 1, 1);
+            }
+        }
+
 
         // end dynamic rendering
         unsafe {

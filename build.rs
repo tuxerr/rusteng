@@ -25,6 +25,10 @@ fn main() {
                 .arg(&format!("vs{}.o", shader_name_noext)).spawn().expect("slang VS failure").wait().expect("Failure to wait");
 
             Command::new("slangc")
+                .args(&[shader_name.as_str(), "-profile", "sm_6_5", "-entry", "meshMain", "-target", "spirv", "-o"])
+                .arg(&format!("mesh{}.o", shader_name_noext)).spawn().expect("slang VS failure").wait().expect("Failure to wait");
+
+            Command::new("slangc")
                 .args(&[shader_name.as_str(), "-profile", "sm_6_0", "-entry", "fragmentMain", "-target", "spirv", "-o"])
                 .arg(&format!("fs{}.o", shader_name_noext))
                 .spawn().expect("slang FS failure").wait().expect("Failure to wait");

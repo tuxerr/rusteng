@@ -1,5 +1,5 @@
 use winit::{
-    application::ApplicationHandler, event::WindowEvent, event_loop::{ControlFlow, EventLoop}, raw_window_handle::{HasDisplayHandle, RawDisplayHandle}, window::Window
+    application::ApplicationHandler, event::WindowEvent, event_loop::{ControlFlow, EventLoop}, platform::x11::EventLoopBuilderExtX11, raw_window_handle::{HasDisplayHandle, RawDisplayHandle}, window::Window
 };
 
 
@@ -56,7 +56,9 @@ impl ApplicationHandler for App {
 fn main() {
     println!("Engine start");
 
-    let event_loop = EventLoop::new().unwrap();
+    let event_loop = EventLoop::builder().with_x11().build().unwrap();
+    
+    //let event_loop = EventLoop::new().unwrap();
     //let event_loop = EventLoop::builder().with_x11().build().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
 

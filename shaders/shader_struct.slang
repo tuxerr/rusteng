@@ -1,8 +1,20 @@
 module shader_struct;
 // slang parallel of engine/shader_struct.rs
 
-static const int MAX_MESHLET_VERTS = 64;
-static const int MAX_MESHLETS_TRIANGLES = 124; // needs to be divisible by 4, closest to 126 for nvidia
+static public const int MAX_MESHLET_VERTS = 64;
+static public const int MAX_MESHLETS_TRIANGLES = 124; // needs to be divisible by 4, closest to 126 for nvidia
+
+public struct VertexStageOutput
+{
+    public CoarseVertex coarseVertex : CoarseVertex;
+    public float4 sv_position : SV_Position;
+};
+
+public struct CoarseVertex {
+    public float2 uv;
+    public uint iid;
+    public uint meshletID;
+};
 
 public struct VertexEntry
 {
@@ -24,6 +36,7 @@ public struct MeshletEntry
     public float4 pos_radius;
     public VertexEntry verts[MAX_MESHLET_VERTS];
     public uint8_t indices[MAX_MESHLETS_TRIANGLES * 3];
+    public uint vertex_count;
     public uint triangle_count;
     public uint triangle_offset_in_primitive;
     public uint primitive_id;

@@ -168,12 +168,15 @@ impl VkContextData {
         // enable dynamic rendering feature
         let mut enable_dynrender =
             vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
+        let mut enable_mesh = 
+            vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(true);
         let mut enable_variablepointers = vk::PhysicalDeviceVariablePointersFeatures::default()
             .variable_pointers(true)
             .variable_pointers_storage_buffer(true);
 
         let mut physicalfeatures2 = vk::PhysicalDeviceFeatures2::default()
             .push_next(&mut enable_dynrender)
+            .push_next(&mut enable_mesh)
             .push_next(&mut enable_variablepointers)
             .push_next(&mut pd12features)
             .features(pd_features);
@@ -308,17 +311,28 @@ impl Pipeline {
         name: &String,
         context: &VkContextData,
         layout: &PipelineLayout,
+        isMesh: bool
     ) -> Self {
-        let vs = Shader::loadFromNameAndType(&name, ShaderType::VERTEX, context);
         let fs = Shader::loadFromNameAndType(&name, ShaderType::FRAGMENT, context);
 
         let shadername = CString::new("main").unwrap();
 
-        let stages = [
+        let input_stage = if !isMesh {
+            let vs = Shader::loadFromNameAndType(&name, ShaderType::VERTEX, context);
             vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::VERTEX)
-                .module(vs.shader_module)
-                .name(&shadername.as_c_str()),
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vs.shader_module)
+            .name(&shadername.as_c_str())
+        } else {
+            let ms = Shader::loadFromNameAndType(&name, ShaderType::MESH, context);
+            vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::MESH_EXT)
+            .module(ms.shader_module)
+            .name(&shadername.as_c_str()) 
+        };
+
+        let stages = [
+            input_stage,
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::FRAGMENT)
                 .module(fs.shader_module)
