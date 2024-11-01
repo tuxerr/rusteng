@@ -14,6 +14,12 @@ derivative = "2.2.0"
 meshopt = "0.3.0"
 zerocopy = "0.8.5"
 zerocopy-derive = "0.8.5"
+rspirv-reflect = "0.8.0"
+rspirv = "0.12.0"
+
+[patch.crates-io]
+rspirv = { path = "../rspirv/rspirv" }
+rspirv-reflect = { path = "../rspirv-reflect" }
 
 [[bin]]
 name = "force-build"

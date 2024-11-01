@@ -5,7 +5,7 @@ pub mod vkutil;
 const REQUIRED_DEVICE_EXTENSIONS: [*const i8; 3] = [
     ash::khr::swapchain::NAME.as_ptr(),
     ash::khr::dynamic_rendering::NAME.as_ptr(),
-    ash::ext::mesh_shader::NAME.as_ptr()
+    ash::ext::mesh_shader::NAME.as_ptr(),
 ];
 const MAX_FRAMES_IN_FLIGHT: u32 = 3;
 const MAX_BINDLESS_TEXTURES: u32 = 100000;
@@ -15,6 +15,8 @@ use ash::vk::{self, PipelineLayout};
 use cgmath::{Deg, Matrix4, Point3, SquareMatrix, Vector3};
 use object::Object;
 use shader_struct::VertexEntry;
+use vkutil::PipelineType;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::{cmp, u32};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle};
@@ -33,12 +35,9 @@ pub struct Engine {
     fences: Vec<vk::Fence>,
     objects: Vec<Object>,
     view_matrix: cgmath::Matrix4<f32>,
-    opaque_layout: PipelineLayout,
-    bindless_texture_descriptorset_layout: vk::DescriptorSetLayout,
     bindless_texture_descriptorset: vk::DescriptorSet,
     bindless_handle: u32,
-    draw_submit_compute_shader: vkutil::Pipeline,
-    meshlet_submit_compute_shader: vkutil::Pipeline,
+    shader_map: HashMap<String, vkutil::Pipeline>,
     global_ibo: vkutil::Buffer,
     global_vbo: vkutil::Buffer,
     global_meshlets: vkutil::Buffer,
@@ -48,17 +47,17 @@ pub struct Engine {
     render_mode: RenderMode,
 }
 
-struct FrameData<'a> {
+struct FrameData {
     commandpool: vk::CommandPool,
-    semaphores: &'a [vk::Semaphore],
+    semaphores: Vec<vk::Semaphore>,
     fence: vk::Fence,
 }
 
-impl<'a> FrameData<'_> {
-    fn new(engine: &'a Engine, indexer: usize) -> FrameData<'a> {
+impl FrameData {
+    fn new(engine: &Engine, indexer: usize) -> FrameData {
         FrameData {
             commandpool: engine.commandpools[1 + indexer],
-            semaphores: &engine.semaphores[1 + indexer * 2..indexer * 2 + 3],
+            semaphores: Vec::from(&engine.semaphores[1 + indexer * 2..indexer * 2 + 3]),
             fence: engine.fences[1 + indexer],
         }
     }
@@ -68,7 +67,7 @@ impl<'a> FrameData<'_> {
 enum RenderMode {
     Draw,
     DrawIndirect,
-    Meshlet
+    Meshlet,
 }
 
 impl Engine {
@@ -125,45 +124,15 @@ impl Engine {
             &context,
         );
 
-        let descriptor_set_layout_bindings = [vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_count(MAX_BINDLESS_TEXTURES) // upper bound only, variable descriptor count
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)];
+        let mut shader_map = HashMap::new();
 
-        let extended_info_binding = [vk::DescriptorBindingFlags::PARTIALLY_BOUND
-            | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND];
-        let mut descriptorset_layout_extended_info =
-            vk::DescriptorSetLayoutBindingFlagsCreateInfo::default()
-                .binding_flags(&extended_info_binding);
-        let descriptorset_layout_create_info = vk::DescriptorSetLayoutCreateInfo::default()
-            .bindings(&descriptor_set_layout_bindings)
-            .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
-            .push_next(&mut descriptorset_layout_extended_info);
+        let opaque_mesh_shader_name = String::from("main");
+        let opaque_meshlet_compute_shader =
+            vkutil::Pipeline::load_mesh_pipeline_from_name(&opaque_mesh_shader_name, &context);
 
-        let bindless_texture_descriptorset_layouts = [unsafe {
-            context
-                .device
-                .create_descriptor_set_layout(&descriptorset_layout_create_info, None)
-                .expect("Failure to create bindless descriptorset layout")
-        }];
+        shader_map.insert(opaque_mesh_shader_name, opaque_meshlet_compute_shader);
 
-        //default engine-wide push constant layouts
-        let push_constant_ranges = [
-            vk::PushConstantRange::default()
-                .stage_flags(
-                    vk::ShaderStageFlags::VERTEX
-                        | vk::ShaderStageFlags::FRAGMENT
-                        | vk::ShaderStageFlags::COMPUTE
-                        | vk::ShaderStageFlags::MESH_EXT,
-                )
-                .offset(0)
-                .size(40), // 3 buffer device addresses for mesh and object data (3*8 = 24) + 8 for object count
-        ];
-
-        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::default()
-            .push_constant_ranges(&push_constant_ranges)
-            .set_layouts(&bindless_texture_descriptorset_layouts);
+        let borrowed_opaque = &shader_map["main"];
 
         let descriptor_pool_sizes = [vk::DescriptorPoolSize::default()
             .descriptor_count(MAX_BINDLESS_TEXTURES)
@@ -173,45 +142,23 @@ impl Engine {
             .max_sets(1)
             .pool_sizes(&descriptor_pool_sizes);
 
-        let opaque_mesh_layout = unsafe {
-            context
-                .device
-                .create_pipeline_layout(&pipeline_layout_create_info, None)
-                .expect("Failure to create pipeline layout")
-        };
-
-        let (descriptor_pool, descriptor_set) = unsafe {
+        let descriptor_set = unsafe {
             let pool = context
                 .device
                 .create_descriptor_pool(&descriptor_pool_create_info, None)
                 .expect("Failure to create descriptor pool!");
 
+            let bindless_texture_descriptorset_layouts =
+                [borrowed_opaque.vk_descriptorset_layouts[0]];
             let descriptor_set_allocinfo = vk::DescriptorSetAllocateInfo::default()
                 .descriptor_pool(pool)
                 .set_layouts(&bindless_texture_descriptorset_layouts);
 
-            let set = context
+            context
                 .device
                 .allocate_descriptor_sets(&descriptor_set_allocinfo)
-                .expect("Failure to allocate bindless descriptor set")[0];
-            (pool, set)
+                .expect("Failure to allocate bindless descriptor set")[0]
         };
-
-        let compute_drawsubmit_shader_name = String::from("draw_submit");
-        let draw_submit_compute_shader =
-            vkutil::Pipeline::load_compute_pipeline_from_name_and_layout(
-                &compute_drawsubmit_shader_name,
-                &context,
-                &opaque_mesh_layout,
-            );
-
-        let compute_meshletsubmit_shader_name = String::from("meshlet_submit");
-        let meshlet_submit_compute_shader =
-                vkutil::Pipeline::load_compute_pipeline_from_name_and_layout(
-                    &compute_meshletsubmit_shader_name,
-                    &context,
-                    &opaque_mesh_layout,
-                );
 
         let mut eng = Engine {
             frame_index: 0,
@@ -227,12 +174,9 @@ impl Engine {
             fences: Vec::new(),
             objects: Vec::new(),
             view_matrix: cgmath::Matrix4::identity(),
-            opaque_layout: opaque_mesh_layout,
-            bindless_texture_descriptorset_layout: bindless_texture_descriptorset_layouts[0],
             bindless_texture_descriptorset: descriptor_set,
             bindless_handle: 0,
-            draw_submit_compute_shader,
-            meshlet_submit_compute_shader,
+            shader_map,
             global_ibo,
             global_vbo,
             global_meshlets,
@@ -245,6 +189,21 @@ impl Engine {
         eng.render_init();
         eng.scene_init();
         eng
+    }
+
+    fn get_pipeline(&mut self, pipeline_name : &str, pipeline_type : PipelineType) -> vkutil::Pipeline {
+        let pipe_name = String::from(pipeline_name);
+        if !self.shader_map.contains_key(&pipe_name)
+        {
+            let new_shader = match pipeline_type {
+                PipelineType::MESH => vkutil::Pipeline::load_mesh_pipeline_from_name(&pipe_name, &self.context),
+                PipelineType::VERTEX => vkutil::Pipeline::load_vertex_pipeline_from_name(&pipe_name, &self.context),
+                PipelineType::COMPUTE => vkutil::Pipeline::load_compute_pipeline_from_name(&pipe_name, &self.context),
+            };
+            self.shader_map.insert(pipe_name.clone(), new_shader);
+        }
+
+        self.shader_map[&pipe_name].clone()
     }
 
     fn render_init(&mut self) {
@@ -292,12 +251,9 @@ impl Engine {
 
     fn scene_init(&mut self) {
         let opaque_pbr_shader_name = String::from("main");
-        let is_mesh = self.render_mode == RenderMode::Meshlet;
-        let opaque_pbr_shader = Rc::new(vkutil::Pipeline::load_gfx_pipeline_from_name_and_layout(
+        let opaque_pbr_shader = Rc::new(vkutil::Pipeline::load_mesh_pipeline_from_name(
             &opaque_pbr_shader_name,
-            &self.context,
-            &self.opaque_layout,
-            is_mesh
+            &self.context
         ));
 
         /*let mut helmet_obj = object::Object::loadObjectInEngine(
@@ -330,7 +286,7 @@ impl Engine {
         );*/
 
         self.view_matrix = cam_transform;
-        self.objects.push(fox_obj); 
+        self.objects.push(fox_obj);
     }
 
     pub fn window_init(&mut self, window: &winit::window::Window) {
@@ -505,7 +461,7 @@ impl Engine {
         }
     }
 
-//    pub fn allocate_primitiveid
+    //    pub fn allocate_primitiveid
 
     pub fn render(&mut self) {
         self.frame_index += 1;
@@ -567,7 +523,7 @@ impl Engine {
             let image_barrier = vk::ImageMemoryBarrier::default()
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                 .src_access_mask(vk::AccessFlags::empty())
+                .src_access_mask(vk::AccessFlags::empty())
                 .dst_access_mask(
                     vk::AccessFlags::COLOR_ATTACHMENT_READ
                         | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
@@ -680,14 +636,14 @@ impl Engine {
     }
 
     fn render_scene(
-        &self,
+        &mut self,
         commandbuffer: &vk::CommandBuffer,
         swapchain_image_view: &vk::ImageView,
         frame_data: &FrameData,
     ) {
         let dynrend_loader =
             ash::khr::dynamic_rendering::Device::new(&self.context.instance, &self.context.device);
-        let mesh_loader = 
+        let mesh_loader =
             ash::ext::mesh_shader::Device::new(&self.context.instance, &self.context.device);
 
         // set scissor and viewports
@@ -717,7 +673,7 @@ impl Engine {
 
         // projection matrix
         let aspect = self.swapchain_extent.width as f32 / self.swapchain_extent.height as f32;
-        let proj_matrix = cgmath::perspective(Deg(45.0f32), 1280.0/800.0, 0.1f32, 200.0f32);
+        let proj_matrix = cgmath::perspective(Deg(45.0f32), 1280.0 / 800.0, 0.1f32, 200.0f32);
 
         //let obj_rotation = Matrix4::from_angle_y(Deg(1.0f32 * self.frame_index as f32));
         let obj_rotation = Matrix4::identity();
@@ -779,10 +735,13 @@ impl Engine {
             );
         }
 
-        let object_count : u64 = match self.render_mode {
+        let object_count: u64 = match self.render_mode {
             RenderMode::DrawIndirect => object_ssbo.len().try_into().unwrap(),
             RenderMode::Draw => self.objects.len() as u64,
-            RenderMode::Meshlet => (self.global_meshlets.allocated_size() / std::mem::size_of::<shader_struct::MeshletEntry>()) as u64,
+            RenderMode::Meshlet => {
+                (self.global_meshlets.allocated_size()
+                    / std::mem::size_of::<shader_struct::MeshletEntry>()) as u64
+            }
         };
 
         // send over push constants and descriptors
@@ -794,27 +753,18 @@ impl Engine {
             drawbuf: self.indirect_draw_buf.buffer_address,
         };
 
+        let meshlet_compute_shader = self.get_pipeline("meshlet_submit", PipelineType::COMPUTE);
         unsafe {
             let push_constant_addresses_u8: [u8; 40] = std::mem::transmute(push_constants);
             self.context.device.cmd_push_constants(
                 *commandbuffer,
-                self.opaque_layout,
+                meshlet_compute_shader.vk_layout,
                 vk::ShaderStageFlags::VERTEX
                     | vk::ShaderStageFlags::FRAGMENT
                     | vk::ShaderStageFlags::COMPUTE
                     | vk::ShaderStageFlags::MESH_EXT,
                 0,
                 &push_constant_addresses_u8[..],
-            );
-
-            // bind bindless descriptorset
-            self.context.device.cmd_bind_descriptor_sets(
-                *commandbuffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.opaque_layout,
-                0,
-                &[self.bindless_texture_descriptorset],
-                &[],
             );
         }
 
@@ -836,20 +786,12 @@ impl Engine {
                 vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
             );
 
-            if(self.render_mode == RenderMode::DrawIndirect) {
-                self.context.device.cmd_bind_pipeline(
-                    *commandbuffer,
-                    vk::PipelineBindPoint::COMPUTE,
-                    self.draw_submit_compute_shader.vk_pipeline,
-                );
-            } else if(self.render_mode == RenderMode::Meshlet) {
-                self.context.device.cmd_bind_pipeline(
-                    *commandbuffer,
-                    vk::PipelineBindPoint::COMPUTE,
-                    self.meshlet_submit_compute_shader.vk_pipeline,
-                );
-            }
-
+            self.context.device.cmd_bind_pipeline(
+                *commandbuffer,
+                vk::PipelineBindPoint::COMPUTE,
+                meshlet_compute_shader.vk_pipeline,
+            );
+            
             let dispatch_size = u32::div_ceil(object_count as u32, 64);
             //let dispatch_size = 1;
             self.context
@@ -864,13 +806,22 @@ impl Engine {
                 vk::AccessFlags::SHADER_WRITE,
                 vk::AccessFlags::INDIRECT_COMMAND_READ,
             );
-                        // draw indirect command on the above buffer
-                        self.context.device.cmd_bind_pipeline(
-                            *commandbuffer,
-                            vk::PipelineBindPoint::GRAPHICS,
-                            self.objects[0].pipeline.vk_pipeline,
-                        );
+            // draw indirect command on the above buffer
+            self.context.device.cmd_bind_pipeline(
+                *commandbuffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.objects[0].pipeline.vk_pipeline,
+            );
 
+            // bind bindless descriptorset
+            self.context.device.cmd_bind_descriptor_sets(
+                *commandbuffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.objects[0].pipeline.vk_layout,
+                0,
+                &[self.bindless_texture_descriptorset],
+                &[],
+            );
         }
 
         // start dynamic rendering
@@ -906,27 +857,9 @@ impl Engine {
             )
         }
 
-        
-        if(self.render_mode == RenderMode::DrawIndirect) {
-        // execute indirect draw based on above buffer
         unsafe {
-
-            self.context.device.cmd_draw_indexed_indirect_count(
-                *commandbuffer,
-                self.indirect_draw_buf.vk_buffer,
-                4,
-                self.indirect_draw_buf.vk_buffer,
-                0,
-                10000,
-                std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32,
-            );
+            mesh_loader.cmd_draw_mesh_tasks(*commandbuffer, object_count as u32, 1, 1);
         }
-        } else if(self.render_mode == RenderMode::Meshlet) {
-            unsafe {
-                mesh_loader.cmd_draw_mesh_tasks(*commandbuffer, object_count as u32, 1, 1);
-            }
-        }
-
 
         // end dynamic rendering
         unsafe {

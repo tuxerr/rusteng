@@ -1,6 +1,9 @@
 use winit::{
-    application::ApplicationHandler, event::WindowEvent, event_loop::{ControlFlow, EventLoop}, platform::x11::EventLoopBuilderExtX11, raw_window_handle::{HasDisplayHandle, RawDisplayHandle}, window::Window
+    application::ApplicationHandler, event::WindowEvent, event_loop::{ControlFlow, EventLoop}, raw_window_handle::{HasDisplayHandle, RawDisplayHandle}, window::Window
 };
+
+#[cfg(target_os = "linux")]
+use winit::platform::x11::EventLoopBuilderExtX11;
 
 
 pub mod engine;
@@ -56,10 +59,12 @@ impl ApplicationHandler for App {
 fn main() {
     println!("Engine start");
 
+    #[cfg(target_os = "linux")]
     let event_loop = EventLoop::builder().with_x11().build().unwrap();
     
-    //let event_loop = EventLoop::new().unwrap();
-    //let event_loop = EventLoop::builder().with_x11().build().unwrap();
+    #[cfg(target_os = "windows")]
+    let event_loop = EventLoop::new().unwrap();
+
     event_loop.set_control_flow(ControlFlow::Poll);
 
     // predisplay handle for vulkan gfx init

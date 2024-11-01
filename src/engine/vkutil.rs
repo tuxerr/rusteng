@@ -4,12 +4,14 @@ use ash::vk::{
 };
 
 use std::cmp::Ordering;
-use std::fs::File;
+use std::collections::BTreeMap;
+use std::fs::{self, File};
 use std::path::Path;
 
 use std::u32;
 use std::{ffi::CStr, ffi::CString, u64};
 
+use rspirv_reflect::*;
 use vk_mem::{self, Alloc};
 
 const VKAPP_NAME: &str = "FoxyGfx";
@@ -168,8 +170,7 @@ impl VkContextData {
         // enable dynamic rendering feature
         let mut enable_dynrender =
             vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
-        let mut enable_mesh = 
-            vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(true);
+        let mut enable_mesh = vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(true);
         let mut enable_variablepointers = vk::PhysicalDeviceVariablePointersFeatures::default()
             .variable_pointers(true)
             .variable_pointers_storage_buffer(true);
@@ -265,10 +266,12 @@ struct Shader {
     name: String,
     shader_type: ShaderType,
     shader_module: vk::ShaderModule,
+    descriptor_sets: BTreeMap<u32, BTreeMap<u32, DescriptorInfo>>,
+    push_constants: Option<PushConstantInfo>,
 }
 
 impl Shader {
-    fn loadFromNameAndType(
+    fn load_from_name_and_type(
         name: &String,
         shader_type: ShaderType,
         context: &VkContextData,
@@ -282,8 +285,11 @@ impl Shader {
         let shader_path_str = format!("shaders/{}{}.o", prefix, name);
         let shader_path = Path::new(&shader_path_str);
 
-        let mut file = File::open(shader_path).expect("Failure to open shader");
-        let spv_words = ash::util::read_spv(&mut file).expect("Failure to read file");
+        let spv_words = {
+            let mut file = File::open(shader_path).expect("Failure to open shader");
+            ash::util::read_spv(&mut file).expect("Failure to read file")
+        };
+        let spv_bytes = fs::read(shader_path).expect("Failure to read spirv bytes");
 
         let shader_module = unsafe {
             let shader_module_create_info = vk::ShaderModuleCreateInfo::default().code(&spv_words);
@@ -293,43 +299,106 @@ impl Shader {
                 .expect("Failed to create shader module")
         };
 
+        let reflect_module = Reflection::new_from_spirv(&spv_bytes.as_slice())
+            .expect("Failure to create reflection module");
+
+        let descriptor_sets = reflect_module
+            .get_descriptor_sets()
+            .expect("Can't read descriptor bindings");
+
+        let push_constants = reflect_module
+            .get_push_constant_range()
+            .expect("Can't read push constants");
+
         Shader {
             name: name.clone(),
             shader_type,
             shader_module,
+            descriptor_sets,
+            push_constants,
         }
     }
 }
 
+#[derive(Copy, Clone)]
+
+pub enum PipelineType {
+    MESH,
+    VERTEX,
+    COMPUTE
+}
+
+#[derive(Clone)]
+
 pub struct Pipeline {
     name: String,
+    pipeline_type: PipelineType,
     pub vk_pipeline: vk::Pipeline,
+    pub vk_layout: vk::PipelineLayout,
+    pub vk_descriptorset_layouts: Vec<vk::DescriptorSetLayout>,
 }
 
 impl Pipeline {
-    pub fn load_gfx_pipeline_from_name_and_layout(
-        name: &String,
-        context: &VkContextData,
-        layout: &PipelineLayout,
-        isMesh: bool
-    ) -> Self {
-        let fs = Shader::loadFromNameAndType(&name, ShaderType::FRAGMENT, context);
+    pub fn load_mesh_pipeline_from_name(name: &String, context: &VkContextData) -> Self {
+        return Self::load_gfx_pipeline_from_name(name, context, true);
+    }
+
+    pub fn load_vertex_pipeline_from_name(name: &String, context: &VkContextData) -> Self {
+        return Self::load_gfx_pipeline_from_name(name, context, false);
+    }
+
+    fn load_gfx_pipeline_from_name(name: &String, context: &VkContextData, is_mesh: bool) -> Self {
+        let fs = Shader::load_from_name_and_type(&name, ShaderType::FRAGMENT, context);
 
         let shadername = CString::new("main").unwrap();
 
-        let input_stage = if !isMesh {
-            let vs = Shader::loadFromNameAndType(&name, ShaderType::VERTEX, context);
-            vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vs.shader_module)
-            .name(&shadername.as_c_str())
+        let (input_stage, input_shader) = if !is_mesh {
+            let vs = Shader::load_from_name_and_type(&name, ShaderType::VERTEX, context);
+            (
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::VERTEX)
+                    .module(vs.shader_module)
+                    .name(&shadername.as_c_str()),
+                vs,
+            )
         } else {
-            let ms = Shader::loadFromNameAndType(&name, ShaderType::MESH, context);
-            vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::MESH_EXT)
-            .module(ms.shader_module)
-            .name(&shadername.as_c_str()) 
+            let ms = Shader::load_from_name_and_type(&name, ShaderType::MESH, context);
+            (
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::MESH_EXT)
+                    .module(ms.shader_module)
+                    .name(&shadername.as_c_str()),
+                ms,
+            )
         };
+
+        let pipeline_type = match is_mesh {
+            true => PipelineType::MESH,
+            false => PipelineType::VERTEX,
+        };
+
+        //create union of descriptor sets and push constants for reflection-based layouts
+        let mut merged_descriptor_sets = input_shader.descriptor_sets;
+        fs.descriptor_sets
+            .iter()
+            .for_each(|(set_idx, descriptor_set)| {
+                if !merged_descriptor_sets.contains_key(set_idx) {
+                    merged_descriptor_sets.insert(*set_idx, descriptor_set.clone());
+                }
+            });
+
+        let push_constants = if input_shader.push_constants.is_none() {
+            fs.push_constants
+        } else {
+            input_shader.push_constants
+        };
+
+        let (reflected_pipeline_layout, descriptorset_layouts) =
+            Self::generate_pipeline_layout_from_reflection(
+                &merged_descriptor_sets,
+                &push_constants,
+                context,
+            );
 
         let stages = [
             input_stage,
@@ -395,7 +464,7 @@ impl Pipeline {
             .depth_stencil_state(&depth_stencil_state)
             .color_blend_state(&color_blend_state)
             .dynamic_state(&dynamic_state)
-            .layout(*layout)
+            .layout(reflected_pipeline_layout)
             .push_next(&mut rendering_state);
 
         let gfxpipe = unsafe {
@@ -407,16 +476,15 @@ impl Pipeline {
 
         Pipeline {
             name: name.clone(),
+            pipeline_type,
             vk_pipeline: gfxpipe,
+            vk_layout: reflected_pipeline_layout,
+            vk_descriptorset_layouts: descriptorset_layouts,
         }
     }
 
-    pub fn load_compute_pipeline_from_name_and_layout(
-        name: &String,
-        context: &VkContextData,
-        layout: &PipelineLayout,
-    ) -> Self {
-        let cs = Shader::loadFromNameAndType(&name, ShaderType::COMPUTE, context);
+    pub fn load_compute_pipeline_from_name(name: &String, context: &VkContextData) -> Self {
+        let cs = Shader::load_from_name_and_type(&name, ShaderType::COMPUTE, context);
         let shadername = CString::new("main").unwrap();
 
         let compute_stage = vk::PipelineShaderStageCreateInfo::default()
@@ -424,9 +492,16 @@ impl Pipeline {
             .module(cs.shader_module)
             .name(&shadername.as_c_str());
 
+        let (reflected_pipeline_layout, descriptorset_layouts) =
+            Self::generate_pipeline_layout_from_reflection(
+                &cs.descriptor_sets,
+                &cs.push_constants,
+                context,
+            );
+
         let pipeline_create_info = vk::ComputePipelineCreateInfo::default()
             .stage(compute_stage)
-            .layout(*layout)
+            .layout(reflected_pipeline_layout)
             .base_pipeline_handle(vk::Pipeline::null());
 
         let gfxpipe = unsafe {
@@ -438,8 +513,108 @@ impl Pipeline {
 
         Pipeline {
             name: name.clone(),
+            pipeline_type: PipelineType::COMPUTE,
             vk_pipeline: gfxpipe,
+            vk_layout: reflected_pipeline_layout,
+            vk_descriptorset_layouts: descriptorset_layouts,
         }
+    }
+
+    fn generate_pipeline_layout_from_reflection(
+        descriptor_sets: &BTreeMap<u32, BTreeMap<u32, DescriptorInfo>>,
+        push_constants: &Option<PushConstantInfo>,
+        context: &VkContextData,
+    ) -> (vk::PipelineLayout, Vec<vk::DescriptorSetLayout>) {
+        let push_constant_ranges: Vec<vk::PushConstantRange> = push_constants
+            .into_iter()
+            .map(|block| {
+                vk::PushConstantRange::default()
+                    .stage_flags(
+                        vk::ShaderStageFlags::VERTEX
+                            | vk::ShaderStageFlags::FRAGMENT
+                            | vk::ShaderStageFlags::COMPUTE
+                            | vk::ShaderStageFlags::MESH_EXT,
+                    )
+                    .offset(block.offset)
+                    .size(block.size) // 3 buffer device addresses for mesh and object data (3*8 = 24) + 8 for object count
+            })
+            .collect();
+
+        let descriptorset_layouts: Vec<vk::DescriptorSetLayout> = descriptor_sets
+            .iter()
+            .map(|(set_idx, reflectset)| {
+                let descriptor_set_layout_bindings_pair: Vec<(
+                    vk::DescriptorSetLayoutBinding,
+                    vk::DescriptorBindingFlags,
+                )> = reflectset
+                    .iter()
+                    .map(|(binding_idx, reflectbinding)| {
+                        let descriptor_type =
+                            vk::DescriptorType::from_raw(reflectbinding.ty.0 as i32);
+
+                        let (descriptor_count, descriptor_flags) =
+                            match reflectbinding.binding_count {
+                                BindingCount::One => (1, vk::DescriptorBindingFlags::empty()),
+                                BindingCount::StaticSized(x) => {
+                                    (x as u32, vk::DescriptorBindingFlags::empty())
+                                }
+                                BindingCount::Unbounded => (
+                                    100000,
+                                    (vk::DescriptorBindingFlags::PARTIALLY_BOUND
+                                        | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND),
+                                ),
+                            };
+
+                        (
+                            vk::DescriptorSetLayoutBinding::default()
+                                .binding(*binding_idx)
+                                .descriptor_count(descriptor_count)
+                                .descriptor_type(descriptor_type)
+                                .stage_flags(
+                                    vk::ShaderStageFlags::VERTEX
+                                        | vk::ShaderStageFlags::FRAGMENT
+                                        | vk::ShaderStageFlags::COMPUTE
+                                        | vk::ShaderStageFlags::MESH_EXT,
+                                ),
+                            descriptor_flags,
+                        )
+                    })
+                    .collect();
+
+                let (descriptor_set_layout_bindings, extended_info_bindings): (
+                    Vec<vk::DescriptorSetLayoutBinding>,
+                    Vec<vk::DescriptorBindingFlags>,
+                ) = descriptor_set_layout_bindings_pair.into_iter().unzip();
+
+                let mut descriptorset_layout_extended_info =
+                    vk::DescriptorSetLayoutBindingFlagsCreateInfo::default()
+                        .binding_flags(&extended_info_bindings);
+                let descriptorset_layout_create_info = vk::DescriptorSetLayoutCreateInfo::default()
+                    .bindings(&descriptor_set_layout_bindings)
+                    .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
+                    .push_next(&mut descriptorset_layout_extended_info);
+
+                unsafe {
+                    context
+                        .device
+                        .create_descriptor_set_layout(&descriptorset_layout_create_info, None)
+                        .expect("Failure to create bindless descriptorset layout")
+                }
+            })
+            .collect();
+
+        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::default()
+            .push_constant_ranges(&push_constant_ranges)
+            .set_layouts(&descriptorset_layouts);
+
+        let opaque_mesh_layout = unsafe {
+            context
+                .device
+                .create_pipeline_layout(&pipeline_layout_create_info, None)
+                .expect("Failure to create pipeline layout")
+        };
+
+        (opaque_mesh_layout, descriptorset_layouts)
     }
 }
 
@@ -556,7 +731,10 @@ impl Buffer {
     }
 
     pub fn allocated_size(&self) -> usize {
-        return self.allocated_slices.last().map_or(0, |slice| slice.offset + slice.size);
+        return self
+            .allocated_slices
+            .last()
+            .map_or(0, |slice| slice.offset + slice.size);
     }
 
     pub fn enqueue_barrier(
@@ -797,12 +975,16 @@ impl Texture {
 
                         let src_subresource = vk::ImageSubresourceLayers::default()
                             .aspect_mask(vk::ImageAspectFlags::COLOR)
-                            .mip_level(mip_level-1)
+                            .mip_level(mip_level - 1)
                             .base_array_layer(0)
                             .layer_count(1);
                         let src_offsets = [
-                            vk::Offset3D { x: 0, y: 0, z: 0},
-                            vk::Offset3D { x: (self.extent.width / 2u32.pow(mip_level-1)) as i32 , y: (self.extent.height / 2u32.pow(mip_level-1)) as i32, z: 1}
+                            vk::Offset3D { x: 0, y: 0, z: 0 },
+                            vk::Offset3D {
+                                x: (self.extent.width / 2u32.pow(mip_level - 1)) as i32,
+                                y: (self.extent.height / 2u32.pow(mip_level - 1)) as i32,
+                                z: 1,
+                            },
                         ];
                         let dst_subresource = vk::ImageSubresourceLayers::default()
                             .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -810,18 +992,31 @@ impl Texture {
                             .base_array_layer(0)
                             .layer_count(1);
                         let dst_offsets = [
-                            vk::Offset3D { x: 0, y: 0, z: 0},
-                            vk::Offset3D { x: (self.extent.width / 2u32.pow(mip_level)) as i32 , y: (self.extent.height / 2u32.pow(mip_level)) as i32, z: 1}
+                            vk::Offset3D { x: 0, y: 0, z: 0 },
+                            vk::Offset3D {
+                                x: (self.extent.width / 2u32.pow(mip_level)) as i32,
+                                y: (self.extent.height / 2u32.pow(mip_level)) as i32,
+                                z: 1,
+                            },
                         ];
-                        let blit_regions = [
-                            vk::ImageBlit::default().src_subresource(src_subresource).src_offsets(src_offsets).dst_subresource(dst_subresource).dst_offsets(dst_offsets)
-                        ];
+                        let blit_regions = [vk::ImageBlit::default()
+                            .src_subresource(src_subresource)
+                            .src_offsets(src_offsets)
+                            .dst_subresource(dst_subresource)
+                            .dst_offsets(dst_offsets)];
 
-                        eng.context.device.cmd_blit_image(commandbuffer, self.vk_image, vk::ImageLayout::GENERAL, self.vk_image, vk::ImageLayout::GENERAL, &blit_regions, vk::Filter::LINEAR);
+                        eng.context.device.cmd_blit_image(
+                            commandbuffer,
+                            self.vk_image,
+                            vk::ImageLayout::GENERAL,
+                            self.vk_image,
+                            vk::ImageLayout::GENERAL,
+                            &blit_regions,
+                            vk::Filter::LINEAR,
+                        );
                     }
                 }
             }
-
         });
     }
 
