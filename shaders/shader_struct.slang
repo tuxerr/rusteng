@@ -70,3 +70,12 @@ public struct DrawBuffer {
     public uint32_t drawCount;
     public VkDrawIndexedIndirectCommand draws[10000];
 };
+
+public struct HiZRegisters
+{
+    public float2x2 z_transform;
+    public int2 resolution;
+    public float2 inv_resolution;
+    public int mips;
+    public uint target_counter;
+};

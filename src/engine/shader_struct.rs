@@ -57,3 +57,12 @@ pub struct PushConstants {
     pub drawbuf : u64
 }
 
+#[repr(C)]
+pub struct HiZRegisters
+{
+    pub z_transform : cgmath::Matrix2<f32>,
+    pub resolution : cgmath::Vector2<i32>,
+    pub inv_resolution : cgmath::Vector2<f32>,
+    pub mips : i32,
+    pub target_counter : u32
+}
