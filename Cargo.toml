@@ -18,8 +18,7 @@ rspirv-reflect = "0.8.0"
 rspirv = "0.12.0"
 
 [patch.crates-io]
-rspirv = { path = "../rspirv/rspirv" }
-rspirv-reflect = { path = "../rspirv-reflect" }
+rspirv-reflect = { git = "https://github.com/Traverse-Research/rspirv-reflect.git" }
 
 [[bin]]
 name = "force-build"
