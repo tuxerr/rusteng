@@ -1,4 +1,5 @@
 import shader_struct;
+import shader_struct;
 
 [vk::push_constant]
 cbuffer Constants {

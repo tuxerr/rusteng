@@ -27,7 +27,7 @@ void meshMain(in uint3 groupID: SV_GroupID,
         return;
     }
 
-    const MeshletEntry *meshlet = meshlets + meshletid;
+    MeshletEntry *meshlet = meshlets + meshletid;
 
     ObjectEntry obj = objects[meshlet->primitive_id];
     SetMeshOutputCounts(meshlet->vertex_count, meshlet->triangle_count);
@@ -91,8 +91,8 @@ float4 fragmentMain(CoarseVertex coarseVertex: CoarseVertex) : SV_Target
         color *= bindlessTextures[obj.occlusion_handle].Sample(coarseVertex.uv);
     }
 
-    color.x = (coarseVertex.meshletID % 12) / 12.0;
-    color.y = ((coarseVertex.meshletID / 12) % 12) / 12.0;
+    //color.x = (coarseVertex.meshletID % 12) / 12.0;
+    //color.y = ((coarseVertex.meshletID / 12) % 12) / 12.0;
     //color.z = ((coarseVertex.meshletID / 144) % 12) / 12.0;
     return color;
 }

@@ -9,16 +9,21 @@ const REQUIRED_DEVICE_EXTENSIONS: [*const i8; 3] = [
 ];
 const MAX_FRAMES_IN_FLIGHT: u32 = 3;
 const MAX_BINDLESS_TEXTURES: u32 = 100000;
+const MAX_PARTICLES: u32 = 100000;
 
-use ash::vk::{self, PipelineLayout};
+use ash::vk::{self, DeviceSize, PFN_vkBindBufferMemory2, PipelineLayout};
 
-use cgmath::{Deg, Matrix4, Point3, SquareMatrix, Vector3};
+use cgmath::{
+    Decomposed, Deg, InnerSpace, Matrix3, Matrix4, One, Point3, Quaternion, SquareMatrix, Vector3,
+    Vector4, Zero,
+};
+use core::mem::size_of;
 use object::Object;
 use shader_struct::VertexEntry;
-use vkutil::PipelineType;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::{cmp, u32};
+use vkutil::PipelineType;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle};
 
 pub struct Engine {
@@ -35,6 +40,7 @@ pub struct Engine {
     fences: Vec<vk::Fence>,
     objects: Vec<Object>,
     view_matrix: cgmath::Matrix4<f32>,
+    view_rotation_quat: cgmath::Quaternion<f32>,
     bindless_texture_descriptorset: vk::DescriptorSet,
     bindless_handle: u32,
     shader_map: HashMap<String, vkutil::Pipeline>,
@@ -44,6 +50,9 @@ pub struct Engine {
     global_primitives: vkutil::Buffer,
     staging_buf: vkutil::Buffer,
     indirect_draw_buf: vkutil::Buffer,
+    indirect_mesh_buf: vkutil::Buffer,
+    particles_buf: vkutil::Buffer,
+    scene_buf: vkutil::Buffer,
     render_mode: RenderMode,
 }
 
@@ -124,6 +133,30 @@ impl Engine {
             &context,
         );
 
+        // buffer for vkCmdDrawIndexedIndirectCount
+        let indirect_mesh_buf = vkutil::Buffer::new_from_size_and_flags(
+            size_of::<shader_struct::MeshletIndirectCommand>() * 1024,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::INDIRECT_BUFFER,
+            vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
+            &context,
+        );
+
+        // buffer for GPU particles simulation, ping/pong
+        let particles_buf = vkutil::Buffer::new_from_size_and_flags(
+            size_of::<shader_struct::Particle>() * 100000 * 2,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
+            &context,
+        );
+
+        let scene_buf = vkutil::Buffer::new_from_size_and_flags(
+            size_of::<shader_struct::Scene>(),
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
+                | vk_mem::AllocationCreateFlags::MAPPED,
+            &context,
+        );
+
         let mut shader_map = HashMap::new();
 
         let opaque_mesh_shader_name = String::from("main");
@@ -174,6 +207,7 @@ impl Engine {
             fences: Vec::new(),
             objects: Vec::new(),
             view_matrix: cgmath::Matrix4::identity(),
+            view_rotation_quat: cgmath::Quaternion::one(),
             bindless_texture_descriptorset: descriptor_set,
             bindless_handle: 0,
             shader_map,
@@ -183,6 +217,9 @@ impl Engine {
             global_primitives,
             staging_buf,
             indirect_draw_buf,
+            indirect_mesh_buf,
+            particles_buf,
+            scene_buf,
             render_mode: RenderMode::Meshlet,
         };
 
@@ -191,14 +228,23 @@ impl Engine {
         eng
     }
 
-    fn get_pipeline(&mut self, pipeline_name : &str, pipeline_type : PipelineType) -> vkutil::Pipeline {
+    fn get_pipeline(
+        &mut self,
+        pipeline_name: &str,
+        pipeline_type: PipelineType,
+    ) -> vkutil::Pipeline {
         let pipe_name = String::from(pipeline_name);
-        if !self.shader_map.contains_key(&pipe_name)
-        {
+        if !self.shader_map.contains_key(&pipe_name) {
             let new_shader = match pipeline_type {
-                PipelineType::MESH => vkutil::Pipeline::load_mesh_pipeline_from_name(&pipe_name, &self.context),
-                PipelineType::VERTEX => vkutil::Pipeline::load_vertex_pipeline_from_name(&pipe_name, &self.context),
-                PipelineType::COMPUTE => vkutil::Pipeline::load_compute_pipeline_from_name(&pipe_name, &self.context),
+                PipelineType::MESH => {
+                    vkutil::Pipeline::load_mesh_pipeline_from_name(&pipe_name, &self.context)
+                }
+                PipelineType::VERTEX => {
+                    vkutil::Pipeline::load_vertex_pipeline_from_name(&pipe_name, &self.context)
+                }
+                PipelineType::COMPUTE => {
+                    vkutil::Pipeline::load_compute_pipeline_from_name(&pipe_name, &self.context)
+                }
             };
             self.shader_map.insert(pipe_name.clone(), new_shader);
         }
@@ -253,40 +299,74 @@ impl Engine {
         let opaque_pbr_shader_name = String::from("main");
         let opaque_pbr_shader = Rc::new(vkutil::Pipeline::load_mesh_pipeline_from_name(
             &opaque_pbr_shader_name,
-            &self.context
+            &self.context,
         ));
 
-        /*let mut helmet_obj = object::Object::loadObjectInEngine(
+        let mut helmet_obj = object::Object::loadObjectInEngine(
             self,
             String::from("DamagedHelmet.glb"),
             opaque_pbr_shader.clone(),
         );
         helmet_obj.transform = helmet_obj.transform * Matrix4::from_angle_x(Deg(90.0));
-        self.objects.push(helmet_obj); */
+        self.objects.push(helmet_obj);
 
-        let mut fox_obj = object::Object::loadObjectInEngine(
-            self,
-            String::from("Sponza/Sponza.gltf"),
-            //String::from("ToyCar.glb"),
-            opaque_pbr_shader.clone(),
-        );
+        // let mut fox_obj = object::Object::loadObjectInEngine(
+        //     self,
+        //     String::from("Sponza/Sponza.gltf"),
+        //     //String::from("ToyCar.glb"),
+        //     opaque_pbr_shader.clone(),
+        // );
         //fox_obj.transform = fox_obj.transform * Matrix4::from_angle_x(Deg(90.0));
+        //fox_obj.transform = fox_obj.transform * Matrix4::from_scale(0.02f32);
+        // self.objects.push(fox_obj);
 
-        fox_obj.transform = fox_obj.transform * Matrix4::from_scale(0.02f32);
-
+        // let cam_transform = Matrix4::look_at_rh(
+        //     Point3::new(-27.0f32, 2.3f32, -1.5f32),
+        //     Point3::new(15.0f32, 8.0f32, 0.0f32),
+        //     Vector3::new(0.0f32, -1.0f32, 0.0f32),
+        // );
         let cam_transform = Matrix4::look_at_rh(
-            Point3::new(-27.0f32, 2.3f32, -1.5f32),
-            Point3::new(15.0f32, 8.0f32, 0.0f32),
-            Vector3::new(0.0f32, -1.0f32, 0.0f32),
-        );
-        /*let cam_transform = Matrix4::look_at_rh(
-            Point3::new(-15.0f32, 2.3f32, -1.5f32),
+            Point3::new(-5.0f32, 2.3f32, -1.5f32),
             Point3::new(0.0f32, 0.0f32, 0.0f32),
             Vector3::new(0.0f32, -1.0f32, 0.0f32),
-        );*/
+        );
+
+        // rotation only portion of the camera for axis-aligned stuff
+        let cam_rotation = Matrix3::from_cols(
+            cam_transform.x.truncate().normalize(),
+            cam_transform.y.truncate().normalize(),
+            cam_transform.z.truncate().normalize(),
+        );
+
+        let proj_matrix = cgmath::perspective(Deg(45.0f32), 1280.0 / 800.0, 0.1f32, 200.0f32);
 
         self.view_matrix = cam_transform;
-        self.objects.push(fox_obj);
+        self.view_rotation_quat = cgmath::Quaternion::from(cam_rotation);
+
+        let scene = shader_struct::Scene {
+            view_matrix: self.view_matrix.into(),
+            view_proj_matrix: (proj_matrix * self.view_matrix).into(),
+            rotation_quaternion: Vector4::new(
+                self.view_rotation_quat.v.x,
+                self.view_rotation_quat.v.y,
+                self.view_rotation_quat.v.z,
+                self.view_rotation_quat.s,
+            )
+            .into(),
+        };
+
+        let scene_alloc_ptr = self
+            .context
+            .vma_alloc
+            .get_allocation_info(&self.scene_buf.mem_alloc)
+            .mapped_data;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &scene as *const shader_struct::Scene,
+                scene_alloc_ptr as *mut shader_struct::Scene,
+                1,
+            );
+        }
     }
 
     pub fn window_init(&mut self, window: &winit::window::Window) {
@@ -461,8 +541,6 @@ impl Engine {
         }
     }
 
-    //    pub fn allocate_primitiveid
-
     pub fn render(&mut self) {
         self.frame_index += 1;
 
@@ -567,6 +645,9 @@ impl Engine {
             );
         }
 
+        // particles GPU simulation (no draw)
+        self.simulate_particles(&commandbuffer, &frame_data);
+
         // actual render work
         self.render_scene(&commandbuffer, &image_view_acquired, &frame_data);
 
@@ -632,6 +713,100 @@ impl Engine {
                         .wait_semaphores(&frameend_sem),
                 )
                 .expect("Failure to present queue");
+        }
+    }
+
+    fn simulate_particles(&mut self, commandbuffer: &vk::CommandBuffer, frame_data: &FrameData) {
+        // indirect particle simulation
+        let simulate_particle_push_constant = shader_struct::PushConstantsParticleSimulate {
+            particles: self.particles_buf.buffer_address,
+            meshletCommands: self.indirect_mesh_buf.buffer_address,
+            nParticleOptions: (self.frame_index % 2) as u32,
+            flTimeRatio: 1.0f32 / 60.0f32,
+            flDrag: 0.0032f32,
+        };
+        let indirectbuf_offset = ((self.frame_index % 2) as usize)
+            * std::mem::size_of::<shader_struct::MeshletIndirectCommand>();
+        let prev_indirectbuf_offset = (((self.frame_index + 1) % 2) as usize)
+            * std::mem::size_of::<shader_struct::MeshletIndirectCommand>();
+
+        let particle_simulation_shader =
+            self.get_pipeline("particle_simulate", PipelineType::COMPUTE);
+        unsafe {
+            self.context.device.cmd_fill_buffer(
+                *commandbuffer,
+                self.indirect_mesh_buf.vk_buffer,
+                indirectbuf_offset as DeviceSize,
+                std::mem::size_of::<shader_struct::MeshletIndirectCommand>() as DeviceSize,
+                0,
+            );
+
+            let push_constant_addresses_u8: [u8; 32] =
+                std::mem::transmute(simulate_particle_push_constant);
+            self.context.device.cmd_push_constants(
+                *commandbuffer,
+                particle_simulation_shader.vk_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                &push_constant_addresses_u8[..],
+            );
+
+            self.context.device.cmd_bind_pipeline(
+                *commandbuffer,
+                vk::PipelineBindPoint::COMPUTE,
+                particle_simulation_shader.vk_pipeline,
+            );
+
+            self.context.device.cmd_dispatch_indirect(
+                *commandbuffer,
+                self.indirect_mesh_buf.vk_buffer,
+                prev_indirectbuf_offset as DeviceSize,
+            );
+
+            self.indirect_mesh_buf.enqueue_barrier(
+                &self.context,
+                commandbuffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+                vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+            );
+        }
+
+        // particle emission
+        let n_particle_to_emit_this_frame = 300;
+
+        let emit_particle_push_constant = shader_struct::PushConstantsParticleEmit {
+            particles: self.particles_buf.buffer_address,
+            meshletCommands: self.indirect_mesh_buf.buffer_address,
+            nParticleOptions: (self.frame_index % 2) as u32,
+            nParticlesToEmit: n_particle_to_emit_this_frame,
+            vInitialPosition: cgmath::Vector3::zero().into(),
+        };
+
+        let particle_emit_shader = self.get_pipeline("particle_emit", PipelineType::COMPUTE);
+        unsafe {
+            let push_constant_addresses_u8: [u8; 40] =
+                std::mem::transmute(emit_particle_push_constant);
+            self.context.device.cmd_push_constants(
+                *commandbuffer,
+                particle_emit_shader.vk_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                &push_constant_addresses_u8[..],
+            );
+
+            self.context.device.cmd_bind_pipeline(
+                *commandbuffer,
+                vk::PipelineBindPoint::COMPUTE,
+                particle_emit_shader.vk_pipeline,
+            );
+
+            let dispatch_size = u32::div_ceil(n_particle_to_emit_this_frame as u32, 64);
+            //let dispatch_size = 1;
+            self.context
+                .device
+                .cmd_dispatch(*commandbuffer, dispatch_size, 1, 1);
         }
     }
 
@@ -791,7 +966,7 @@ impl Engine {
                 vk::PipelineBindPoint::COMPUTE,
                 meshlet_compute_shader.vk_pipeline,
             );
-            
+
             let dispatch_size = u32::div_ceil(object_count as u32, 64);
             //let dispatch_size = 1;
             self.context
@@ -859,6 +1034,44 @@ impl Engine {
 
         unsafe {
             mesh_loader.cmd_draw_mesh_tasks(*commandbuffer, object_count as u32, 1, 1);
+        }
+
+        // render particles
+        let particle_render_shader = self.get_pipeline("particle_render", PipelineType::MESH);
+        let indirectbuf_offset = ((self.frame_index % 2) as usize)
+            * std::mem::size_of::<shader_struct::MeshletIndirectCommand>();
+        let particle_draw_push = shader_struct::PushConstantsParticleRender {
+            particles: self.particles_buf.buffer_address,
+            scene: self.scene_buf.buffer_address,
+            meshlet_commands: self.indirect_mesh_buf.buffer_address,
+            commandOffset: (self.frame_index % 2) as u32,
+            particleOffset: ((self.frame_index % 2) * 100000) as u32,
+        };
+
+        unsafe {
+            // draw indirect command on the above buffer
+            self.context.device.cmd_bind_pipeline(
+                *commandbuffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                particle_render_shader.vk_pipeline,
+            );
+
+            let push_constant_addresses_u8: [u8; 32] = std::mem::transmute(particle_draw_push);
+            self.context.device.cmd_push_constants(
+                *commandbuffer,
+                particle_render_shader.vk_layout,
+                vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::MESH_EXT,
+                0,
+                &push_constant_addresses_u8[..],
+            );
+
+            mesh_loader.cmd_draw_mesh_tasks_indirect(
+                *commandbuffer,
+                self.indirect_mesh_buf.vk_buffer,
+                indirectbuf_offset as u64,
+                1,
+                0,
+            );
         }
 
         // end dynamic rendering
