@@ -9,16 +9,13 @@ winit = "0.30.5"
 gltf = "1.4.1"
 ash = { version = "0.38.0", features = ["linked"] }
 ash-window = "0.13.0"
-vk-mem = "0.4.0"
+vk-mem = "0.5.0"
 derivative = "2.2.0"
-meshopt = "0.3.0"
+meshopt = "0.6.2"
 zerocopy = "0.8.5"
 zerocopy-derive = "0.8.5"
-rspirv-reflect = "0.8.0"
+rspirv-reflect = "0.9.0"
 rspirv = "0.12.0"
-
-[patch.crates-io]
-rspirv-reflect = { git = "https://github.com/Traverse-Research/rspirv-reflect.git" }
 
 [[bin]]
 name = "force-build"
