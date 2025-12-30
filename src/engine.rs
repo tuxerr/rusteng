@@ -7,6 +7,9 @@ const REQUIRED_DEVICE_EXTENSIONS: [*const i8; 3] = [
     ash::khr::dynamic_rendering::NAME.as_ptr(),
     ash::ext::mesh_shader::NAME.as_ptr(),
 ];
+
+const ADDITIONAL_INSTANCE_EXTENSIONS: [*const i8; 1] = [ash::ext::debug_utils::NAME.as_ptr()];
+
 const MAX_FRAMES_IN_FLIGHT: u32 = 3;
 const MAX_BINDLESS_TEXTURES: u32 = 100000;
 const MAX_PARTICLES: u32 = 100000;
@@ -25,6 +28,7 @@ use std::rc::Rc;
 use std::{cmp, u32};
 use vkutil::PipelineType;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle};
+use zerocopy::IntoBytes;
 
 pub struct Engine {
     frame_index: i64,
@@ -52,6 +56,7 @@ pub struct Engine {
     indirect_draw_buf: vkutil::Buffer,
     indirect_mesh_buf: vkutil::Buffer,
     particles_buf: vkutil::Buffer,
+    scene_struct: shader_struct::Scene,
     scene_buf: vkutil::Buffer,
     render_mode: RenderMode,
 }
@@ -84,8 +89,12 @@ impl Engine {
         let required_instance_extensions = ash_window::enumerate_required_extensions(disp_handle)
             .expect("Failure to enumerate required extensions!");
 
+        let mut additional_exts = Vec::from(ADDITIONAL_INSTANCE_EXTENSIONS);
+        let mut full_instance_extensions = Vec::from(required_instance_extensions);
+        full_instance_extensions.append(&mut additional_exts);
+
         let context = vkutil::VkContextData::instanciateWithExtensions(
-            &required_instance_extensions,
+            &full_instance_extensions.as_slice(),
             &REQUIRED_DEVICE_EXTENSIONS,
         );
 
@@ -220,6 +229,7 @@ impl Engine {
             indirect_mesh_buf,
             particles_buf,
             scene_buf,
+            scene_struct: shader_struct::Scene::default(),
             render_mode: RenderMode::Meshlet,
         };
 
@@ -343,7 +353,7 @@ impl Engine {
         self.view_matrix = cam_transform;
         self.view_rotation_quat = cgmath::Quaternion::from(cam_rotation);
 
-        let scene = shader_struct::Scene {
+        self.scene_struct = shader_struct::Scene {
             view_matrix: self.view_matrix.into(),
             view_proj_matrix: (proj_matrix * self.view_matrix).into(),
             rotation_quaternion: Vector4::new(
@@ -353,8 +363,12 @@ impl Engine {
                 self.view_rotation_quat.s,
             )
             .into(),
+            frame_index: self.frame_index as u32,
         };
+        self.upload_scene_to_gpu();
+    }
 
+    pub fn upload_scene_to_gpu(&mut self) {
         let scene_alloc_ptr = self
             .context
             .vma_alloc
@@ -362,7 +376,7 @@ impl Engine {
             .mapped_data;
         unsafe {
             std::ptr::copy_nonoverlapping(
-                &scene as *const shader_struct::Scene,
+                &self.scene_struct as *const shader_struct::Scene,
                 scene_alloc_ptr as *mut shader_struct::Scene,
                 1,
             );
@@ -550,6 +564,8 @@ impl Engine {
             ash::khr::swapchain::Device::new(&self.context.instance, &self.context.device);
 
         let frame_data = FrameData::new(self, frame_indexer);
+        self.scene_struct.frame_index = self.frame_index as u32;
+        self.upload_scene_to_gpu();
 
         // wait on completion of previous frame in flight
         unsafe {
@@ -774,11 +790,12 @@ impl Engine {
         }
 
         // particle emission
-        let n_particle_to_emit_this_frame = 300;
+        let n_particle_to_emit_this_frame = 500;
 
         let emit_particle_push_constant = shader_struct::PushConstantsParticleEmit {
             particles: self.particles_buf.buffer_address,
             meshletCommands: self.indirect_mesh_buf.buffer_address,
+            scene: self.scene_buf.buffer_address,
             nParticleOptions: (self.frame_index % 2) as u32,
             nParticlesToEmit: n_particle_to_emit_this_frame,
             vInitialPosition: cgmath::Vector3::zero().into(),
@@ -786,7 +803,7 @@ impl Engine {
 
         let particle_emit_shader = self.get_pipeline("particle_emit", PipelineType::COMPUTE);
         unsafe {
-            let push_constant_addresses_u8: [u8; 40] =
+            let push_constant_addresses_u8: [u8; 48] =
                 std::mem::transmute(emit_particle_push_constant);
             self.context.device.cmd_push_constants(
                 *commandbuffer,

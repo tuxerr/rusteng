@@ -82,17 +82,19 @@ pub struct MeshletIndirectCommand {
 }
 
 #[repr(C)]
-#[derive(IntoBytes, Immutable, Clone, Copy)]
+#[derive(IntoBytes, Immutable, Clone, Copy, Default)]
 pub struct Scene {
     pub view_proj_matrix: [[f32; 4]; 4],
     pub view_matrix: [[f32; 4]; 4],
     pub rotation_quaternion: [f32; 4],
+    pub frame_index: u32,
 }
 
 // individual shaders push constant definitions (wip : reflect!)
 pub struct PushConstantsParticleEmit {
     pub particles: u64,
     pub meshletCommands: u64,
+    pub scene: u64,
     pub nParticleOptions: u32,
     pub nParticlesToEmit: u32,
     pub vInitialPosition: [f32; 3],

@@ -34,7 +34,8 @@ public struct Scene
 {
     public float4x4 viewProjMatrix;
     public float4x4 viewMatrix;
-    public float4   rotationQuaternion;
+    public float4 rotationQuaternion;
+    public uint frame_index;
 }
 
 // meshlet definition structures

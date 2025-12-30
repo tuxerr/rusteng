@@ -1,6 +1,6 @@
 use ash::vk::{
-    self, ImageAspectFlags, ImageLayout, ImageTiling, ImageType, PipelineLayout, QueueFlags,
-    SampleCountFlags,
+    self, BlendFactor, BlendOp, DebugUtilsObjectNameInfoEXT, ImageAspectFlags, ImageLayout,
+    ImageTiling, ImageType, PipelineLayout, QueueFlags, SampleCountFlags,
 };
 
 use std::cmp::Ordering;
@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::Path;
 
+use std::str::FromStr;
 use std::u32;
 use std::{ffi::CStr, ffi::CString, u64};
 
@@ -325,7 +326,7 @@ impl Shader {
 pub enum PipelineType {
     MESH,
     VERTEX,
-    COMPUTE
+    COMPUTE,
 }
 
 #[derive(Clone)]
@@ -435,14 +436,17 @@ impl Pipeline {
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
         let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::default()
-            .depth_test_enable(true)
+            .depth_test_enable(false)
             .depth_write_enable(true)
             .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
 
         // opaque draw
         let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
-            .blend_enable(false)
-            .color_write_mask(vk::ColorComponentFlags::RGBA)];
+            .blend_enable(true)
+            .color_write_mask(vk::ColorComponentFlags::RGBA)
+            .color_blend_op(BlendOp::ADD)
+            .src_color_blend_factor(BlendFactor::SRC_ALPHA)
+            .dst_color_blend_factor(BlendFactor::ONE)];
         let color_blend_state =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
 
@@ -474,6 +478,17 @@ impl Pipeline {
                 .expect("Failure to generate pipelines")
         }[0];
 
+        let shadername_cstring = CString::from_str(name).unwrap();
+
+        let debug_utils = ash::ext::debug_utils::Device::new(&context.instance, &context.device);
+        let debug_utils_name = DebugUtilsObjectNameInfoEXT::default()
+            .object_handle(gfxpipe)
+            .object_name(shadername_cstring.as_c_str());
+
+        unsafe {
+            debug_utils.set_debug_utils_object_name(&debug_utils_name);
+        }
+
         Pipeline {
             name: name.clone(),
             pipeline_type,
@@ -504,17 +519,28 @@ impl Pipeline {
             .layout(reflected_pipeline_layout)
             .base_pipeline_handle(vk::Pipeline::null());
 
-        let gfxpipe = unsafe {
+        let compute_pipe = unsafe {
             context
                 .device
                 .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_create_info], None)
                 .expect("Failure to generate compute pipelines")
         }[0];
 
+        let shadername_cstring = CString::from_str(name).unwrap();
+
+        let debug_utils = ash::ext::debug_utils::Device::new(&context.instance, &context.device);
+        let debug_utils_name = DebugUtilsObjectNameInfoEXT::default()
+            .object_handle(compute_pipe)
+            .object_name(shadername_cstring.as_c_str());
+
+        unsafe {
+            debug_utils.set_debug_utils_object_name(&debug_utils_name);
+        }
+
         Pipeline {
             name: name.clone(),
             pipeline_type: PipelineType::COMPUTE,
-            vk_pipeline: gfxpipe,
+            vk_pipeline: compute_pipe,
             vk_layout: reflected_pipeline_layout,
             vk_descriptorset_layouts: descriptorset_layouts,
         }
